@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local application & download caches
+.spotify_dl_cache.json
+.gui_config.json
+
+# Temporary & test folders
+test_out/
+*.tmp
+
+# Distribution / packaging
+build/
+dist/
+*.spec
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# OS generated
+.DS_Store
+Thumbs.db

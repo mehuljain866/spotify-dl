@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+"""
+gui.py — Modern GUI for Spotify Downloader
+Built with CustomTkinter. Provides a clean, simple interface to download
+Spotify songs/playlists with full metadata, album art, and progress tracking.
+"""
+
+import os
+import re
+import sys
+import threading
+import time
+from pathlib import Path
+from tkinter import filedialog, messagebox
+
+# Ensure stdout/stderr are safe on Windows even under pythonw.exe
+if sys.stdout is None:
+    try:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    except Exception:
+        pass
+if sys.stderr is None:
+    try:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    except Exception:
+        pass
+
+if sys.platform == "win32":
+    if sys.stdout is not None:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if sys.stderr is not None:
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+import customtkinter as ctk
+
+# Ensure the local directory is on sys.path
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from spotify_dl import run_download, extract_spotify_id
+
+
+class SpotifyDownloaderApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        # Window Appearance
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("green")
+
+        self.title("Spotify Downloader")
+        self.geometry("640x560")
+        self.minsize(580, 520)
+
+        # Set window icon if available
+        icon_path = SCRIPT_DIR / "icon.ico"
+        if icon_path.exists():
+            try:
+                self.iconbitmap(str(icon_path))
+            except Exception:
+                pass
+
+        # State variables
+        self.is_downloading = False
+        self._cancel_requested = False
+        self._download_thread: threading.Thread = None
+
+        # Load last used directory
+        self.config_file = SCRIPT_DIR / ".gui_config.json"
+        self.output_dir = self._load_last_dir()
+
+        self._create_widgets()
+
+    def _load_last_dir(self) -> Path:
+        default_dir = Path.home() / "Music" / "Spotify Downloads"
+        if self.config_file.exists():
+            try:
+                import json
+                with open(self.config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    saved = Path(data.get("output_dir", ""))
+                    if saved.exists():
+                        return saved
+            except Exception:
+                pass
+        return default_dir
+
+    def _save_last_dir(self, directory: Path):
+        try:
+            import json
+            with open(self.config_file, "w", encoding="utf-8") as f:
+                json.dump({"output_dir": str(directory)}, f)
+        except Exception:
+            pass
+
+    def _create_widgets(self):
+        # Main padding container
+        main_frame = ctk.CTkFrame(self, fg_color="transparent")
+        main_frame.pack(fill="both", expand=True, padx=24, pady=18)
+
+        # Header Title
+        title_label = ctk.CTkLabel(
+            main_frame,
+            text="Spotify Downloader",
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color="#1DB954",
+        )
+        title_label.pack(anchor="w", pady=(0, 2))
+
+        subtitle_label = ctk.CTkLabel(
+            main_frame,
+            text="Download songs, albums, and playlists with album art & tags",
+            font=ctk.CTkFont(size=12),
+            text_color="gray70",
+        )
+        subtitle_label.pack(anchor="w", pady=(0, 14))
+
+        # ── Link Input Card ──────────────────────────────────────────────────
+        link_frame = ctk.CTkFrame(main_frame, fg_color="#1E1E1E", corner_radius=10)
+        link_frame.pack(fill="x", pady=(0, 10), padx=0)
+
+        link_inner = ctk.CTkFrame(link_frame, fg_color="transparent")
+        link_inner.pack(fill="x", padx=14, pady=12)
+
+        link_title = ctk.CTkLabel(
+            link_inner,
+            text="Spotify Link (Playlist, Album, or Track):",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        link_title.pack(anchor="w", pady=(0, 6))
+
+        link_row = ctk.CTkFrame(link_inner, fg_color="transparent")
+        link_row.pack(fill="x")
+
+        self.url_entry = ctk.CTkEntry(
+            link_row,
+            placeholder_text="https://open.spotify.com/playlist/... or track link",
+            font=ctk.CTkFont(size=12),
+            height=36,
+        )
+        self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        paste_btn = ctk.CTkButton(
+            link_row,
+            text="Paste",
+            width=65,
+            height=36,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=self._paste_clipboard,
+        )
+        paste_btn.pack(side="left", padx=(0, 4))
+
+        clear_btn = ctk.CTkButton(
+            link_row,
+            text="Clear",
+            width=55,
+            height=36,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=lambda: self.url_entry.delete(0, "end"),
+        )
+        clear_btn.pack(side="left")
+
+        # ── Output Directory Card ────────────────────────────────────────────
+        folder_frame = ctk.CTkFrame(main_frame, fg_color="#1E1E1E", corner_radius=10)
+        folder_frame.pack(fill="x", pady=(0, 14), padx=0)
+
+        folder_inner = ctk.CTkFrame(folder_frame, fg_color="transparent")
+        folder_inner.pack(fill="x", padx=14, pady=12)
+
+        folder_title = ctk.CTkLabel(
+            folder_inner,
+            text="Download Folder:",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        folder_title.pack(anchor="w", pady=(0, 6))
+
+        folder_row = ctk.CTkFrame(folder_inner, fg_color="transparent")
+        folder_row.pack(fill="x")
+
+        self.folder_entry = ctk.CTkEntry(
+            folder_row,
+            font=ctk.CTkFont(size=12),
+            height=36,
+        )
+        self.folder_entry.insert(0, str(self.output_dir))
+        self.folder_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        browse_btn = ctk.CTkButton(
+            folder_row,
+            text="Browse...",
+            width=80,
+            height=36,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=self._browse_folder,
+        )
+        browse_btn.pack(side="left", padx=(0, 4))
+
+        open_folder_btn = ctk.CTkButton(
+            folder_row,
+            text="Open",
+            width=60,
+            height=36,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=self._open_in_explorer,
+        )
+        open_folder_btn.pack(side="left")
+
+        # ── Speed / Concurrency Control ──────────────────────────────────────
+        speed_row = ctk.CTkFrame(main_frame, fg_color="transparent")
+        speed_row.pack(fill="x", pady=(0, 10))
+
+        speed_label = ctk.CTkLabel(
+            speed_row,
+            text="Download Speed (Parallel):",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="gray85",
+        )
+        speed_label.pack(side="left", padx=(4, 8))
+
+        self.threads_var = ctk.StringVar(value="4 Songs at once (Fast)")
+        self.threads_menu = ctk.CTkOptionMenu(
+            speed_row,
+            values=[
+                "1 Song at a time",
+                "3 Songs at once",
+                "4 Songs at once (Fast)",
+                "6 Songs at once (Turbo)",
+            ],
+            variable=self.threads_var,
+            width=210,
+            height=32,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.threads_menu.pack(side="right")
+
+        # ── Download Action Button ───────────────────────────────────────────
+        self.start_btn = ctk.CTkButton(
+            main_frame,
+            text="▶ Start Download",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            height=42,
+            fg_color="#1DB954",
+            hover_color="#1AA34A",
+            text_color="#000000",
+            command=self._on_start_click,
+        )
+        self.start_btn.pack(fill="x", pady=(0, 14))
+
+        # ── Progress & Status Section ────────────────────────────────────────
+        progress_card = ctk.CTkFrame(main_frame, fg_color="#1E1E1E", corner_radius=10)
+        progress_card.pack(fill="both", expand=True)
+
+        progress_inner = ctk.CTkFrame(progress_card, fg_color="transparent")
+        progress_inner.pack(fill="both", expand=True, padx=14, pady=12)
+
+        status_header_row = ctk.CTkFrame(progress_inner, fg_color="transparent")
+        status_header_row.pack(fill="x", pady=(0, 4))
+
+        self.status_label = ctk.CTkLabel(
+            status_header_row,
+            text="Ready to download",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w",
+        )
+        self.status_label.pack(side="left", fill="x", expand=True)
+
+        self.percent_label = ctk.CTkLabel(
+            status_header_row,
+            text="0%",
+            font=ctk.CTkFont(size=12),
+            text_color="gray70",
+        )
+        self.percent_label.pack(side="right")
+
+        self.progress_bar = ctk.CTkProgressBar(
+            progress_inner,
+            height=10,
+            progress_color="#1DB954",
+            fg_color="#333333",
+        )
+        self.progress_bar.set(0.0)
+        self.progress_bar.pack(fill="x", pady=(2, 10))
+
+        # Log box for live details
+        self.log_textbox = ctk.CTkTextbox(
+            progress_inner,
+            height=100,
+            font=ctk.CTkFont(family="Consolas", size=11),
+            fg_color="#121212",
+            text_color="gray85",
+            corner_radius=6,
+        )
+        self.log_textbox.pack(fill="both", expand=True)
+        self.log_textbox.insert("end", "Paste a Spotify link above and click 'Start Download'.\n")
+        self.log_textbox.configure(state="disabled")
+
+    def _paste_clipboard(self):
+        try:
+            clipboard_text = self.clipboard_get().strip()
+            if clipboard_text:
+                self.url_entry.delete(0, "end")
+                self.url_entry.insert(0, clipboard_text)
+        except Exception:
+            pass
+
+    def _browse_folder(self):
+        current = self.folder_entry.get().strip()
+        chosen = filedialog.askdirectory(initialdir=current or str(Path.home()))
+        if chosen:
+            self.folder_entry.delete(0, "end")
+            self.folder_entry.insert(0, chosen)
+            self._save_last_dir(Path(chosen))
+
+    def _open_in_explorer(self):
+        path_str = self.folder_entry.get().strip()
+        p = Path(path_str)
+        if not p.exists():
+            p.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(p))
+
+    def _append_log(self, text: str):
+        self.log_textbox.configure(state="normal")
+        self.log_textbox.insert("end", f"{text}\n")
+        self.log_textbox.see("end")
+        self.log_textbox.configure(state="disabled")
+
+    def _on_start_click(self):
+        if self.is_downloading:
+            # User clicked Cancel
+            self._cancel_requested = True
+            self.status_label.configure(text="Cancelling download...")
+            self.start_btn.configure(state="disabled", text="Stopping...")
+            return
+
+        url = self.url_entry.get().strip()
+        if not url:
+            messagebox.showwarning("Missing Link", "Please paste a Spotify playlist, album, or track link first.")
+            return
+
+        # Auto-add https:// if missing
+        if not url.startswith("http://") and not url.startswith("https://") and not url.startswith("spotify:"):
+            url = "https://" + url
+            self.url_entry.delete(0, "end")
+            self.url_entry.insert(0, url)
+
+        try:
+            extract_spotify_id(url)
+        except ValueError:
+            messagebox.showerror(
+                "Invalid Link",
+                "The link does not appear to be a valid Spotify URL.\nExample: https://open.spotify.com/playlist/..."
+            )
+            return
+
+        folder_str = self.folder_entry.get().strip()
+        if not folder_str:
+            folder_str = str(Path.home() / "Music" / "Spotify Downloads")
+
+        output_path = Path(folder_str).expanduser().resolve()
+        output_path.mkdir(parents=True, exist_ok=True)
+        self._save_last_dir(output_path)
+
+        # Reset progress & start thread
+        self.is_downloading = True
+        self._cancel_requested = False
+        self.progress_bar.set(0.0)
+        self.percent_label.configure(text="0%")
+        self.status_label.configure(text="Connecting to Spotify...")
+        self.start_btn.configure(
+            text="⏹ Cancel Download",
+            fg_color="#E53935",
+            hover_color="#C62828",
+            text_color="#FFFFFF",
+        )
+
+        # Determine max parallel workers from dropdown
+        speed_text = self.threads_var.get()
+        m = re.search(r"\d+", speed_text)
+        max_workers = int(m.group()) if m else 4
+
+        self._append_log("─" * 45)
+        self._append_log(f"Starting download to: {output_path}")
+        self._append_log(f"Speed mode: {max_workers} songs at once")
+
+        self._download_thread = threading.Thread(
+            target=self._run_download_worker,
+            args=(url, output_path, max_workers),
+            daemon=True,
+        )
+        self._download_thread.start()
+
+    def _run_download_worker(self, url: str, output_path: Path, max_workers: int = 4):
+        def progress_callback(status: str, prog: float, current_track: str = None):
+            self.after(0, lambda s=status, p=prog, c=current_track: self._update_progress(s, p, c))
+
+        def cancel_check() -> bool:
+            return self._cancel_requested
+
+        try:
+            result = run_download(
+                playlist_url=url,
+                output_dir=output_path,
+                fmt="mp3",
+                bitrate="320k",
+                max_workers=max_workers,
+                callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+            self.after(0, lambda r=result: self._on_download_complete(r))
+        except Exception as e:
+            import traceback
+            err_details = traceback.format_exc()
+            self.after(0, lambda m=str(e), d=err_details: self._on_download_error(m, d))
+
+    def _update_progress(self, status: str, prog: float, current_track: str = None):
+        try:
+            self.status_label.configure(text=status)
+            if prog >= 0.0:
+                self.progress_bar.set(min(1.0, max(0.0, prog)))
+                pct = int(min(1.0, max(0.0, prog)) * 100)
+                self.percent_label.configure(text=f"{pct}%")
+            self._append_log(status)
+        except Exception:
+            pass
+
+    def _on_download_complete(self, result: dict):
+        self.is_downloading = False
+        self.start_btn.configure(
+            state="normal",
+            text="▶ Start Download",
+            fg_color="#1DB954",
+            hover_color="#1AA34A",
+            text_color="#000000",
+        )
+
+        if result.get("cancelled"):
+            self.status_label.configure(text="Download cancelled.")
+            self._append_log("Download was cancelled.")
+            return
+
+        downloaded = result.get("downloaded", 0)
+        skipped = result.get("skipped", 0)
+        failed = result.get("failed", 0)
+
+        summary_msg = f"Done! {downloaded} downloaded, {skipped} already up-to-date."
+        if failed > 0:
+            summary_msg += f" ({failed} failed)"
+
+        self.status_label.configure(text=summary_msg)
+        self.progress_bar.set(1.0)
+        self.percent_label.configure(text="100%")
+        self._append_log(f"✔ {summary_msg}")
+
+        # Show friendly dialog
+        messagebox.showinfo(
+            "Download Finished",
+            f"{summary_msg}\n\nFiles saved in:\n{result.get('output_dir', '')}"
+        )
+
+    def _on_download_error(self, error_msg: str, error_details: str = ""):
+        self.is_downloading = False
+        self.start_btn.configure(
+            state="normal",
+            text="▶ Start Download",
+            fg_color="#1DB954",
+            hover_color="#1AA34A",
+            text_color="#000000",
+        )
+        self.status_label.configure(text=f"Error: {error_msg}")
+        self._append_log(f"ERROR: {error_msg}")
+        if error_details:
+            self._append_log(error_details)
+        messagebox.showerror("Download Error", f"An error occurred while downloading:\n\n{error_msg}")
+
+
+def launch():
+    app = SpotifyDownloaderApp()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    launch()
