@@ -8,6 +8,34 @@ A fast, modern desktop application and CLI that downloads Spotify playlists, alb
 
 ---
 
+## ⚡ 1-Line Quick Install
+
+Install and launch **Spotify Downloader** with a single command:
+
+### 🪟 Windows (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/mehuljain866/spotify-dl/main/install.ps1 | iex
+```
+
+### 🍎 macOS / 🐧 Linux (Terminal)
+```bash
+curl -fsSL https://raw.githubusercontent.com/mehuljain866/spotify-dl/main/install.sh | bash
+```
+
+---
+
+## 📦 Single-File Standalone Downloads (No Python Required)
+
+Prefer a portable single-file app without installing Python? Download from [**Latest Releases**](https://github.com/mehuljain866/spotify-dl/releases/latest):
+
+| Platform | File | How to Run |
+|----------|------|------------|
+| **Windows** | `Spotify-Downloader-Windows.exe` | Double-click to run directly |
+| **Linux** | `Spotify-Downloader-Linux` | `chmod +x Spotify-Downloader-Linux && ./Spotify-Downloader-Linux` |
+| **macOS** | `Spotify-Downloader-macOS.zip` | Unzip and open `Spotify Downloader.app` |
+
+---
+
 ## ✨ Features
 
 - **Blazing Fast Parallel Downloads**: Download up to 4 or 6 songs at the same time concurrently for up to 5x faster downloads. Configurable in the GUI and CLI.

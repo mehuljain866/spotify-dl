@@ -1,0 +1,96 @@
+name: Build & Release Standalone Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: Spotify-Downloader-Windows.exe
+            build_cmd: |
+              pip install -r requirements.txt pyinstaller
+              pyinstaller --onefile --windowed --name "Spotify-Downloader-Windows" --icon "icon.ico" --collect-all customtkinter --collect-all spotapi --add-data "icon.ico;." gui.py
+            output_path: dist/Spotify-Downloader-Windows.exe
+
+          - os: ubuntu-latest
+            artifact_name: Spotify-Downloader-Linux
+            build_cmd: |
+              sudo apt-get update && sudo apt-get install -y ffmpeg python3-tk
+              pip install -r requirements.txt pyinstaller
+              pyinstaller --onefile --name "Spotify-Downloader-Linux" --collect-all customtkinter --collect-all spotapi --add-data "icon.ico:." gui.py
+            output_path: dist/Spotify-Downloader-Linux
+
+          - os: macos-latest
+            artifact_name: Spotify-Downloader-macOS.zip
+            build_cmd: |
+              brew install ffmpeg python-tk@3.12 || true
+              pip install -r requirements.txt pyinstaller
+              pyinstaller --onefile --windowed --name "Spotify-Downloader-macOS" --icon "icon.ico" --collect-all customtkinter --collect-all spotapi --add-data "icon.ico:." gui.py
+              cd dist && zip -r Spotify-Downloader-macOS.zip Spotify-Downloader-macOS.app Spotify-Downloader-macOS 2>/dev/null || zip -r Spotify-Downloader-macOS.zip *
+            output_path: dist/Spotify-Downloader-macOS.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build Standalone Executable
+        run: ${{ matrix.build_cmd }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.output_path }}
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+
+      - name: Flatten release assets
+        run: |
+          mkdir -p final_assets
+          find release_assets -type f -exec cp {} final_assets/ \;
+          ls -la final_assets/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || 'v1.0.0' }}
+          name: Spotify Downloader ${{ github.ref_name || 'v1.0.0' }}
+          draft: false
+          prerelease: false
+          files: final_assets/*
+          body: |
+            ### 🎵 Spotify Downloader Standalone Releases
+
+            Download the single-file executable for your platform:
+            - **Windows**: `Spotify-Downloader-Windows.exe` (Run directly, no Python required)
+            - **Linux**: `Spotify-Downloader-Linux` (`chmod +x Spotify-Downloader-Linux && ./Spotify-Downloader-Linux`)
+            - **macOS**: `Spotify-Downloader-macOS.zip` (Extract and launch)
