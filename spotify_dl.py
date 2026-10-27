@@ -75,6 +75,21 @@ from mutagen.id3 import (
 from mutagen.mp3 import MP3
 
 try:
+    from mutagen.flac import FLAC, Picture
+except ImportError:
+    FLAC, Picture = None, None
+
+try:
+    from mutagen.mp4 import MP4, MP4Cover
+except ImportError:
+    MP4, MP4Cover = None, None
+
+try:
+    from mutagen.oggopus import OggOpus
+except ImportError:
+    OggOpus = None
+
+try:
     import yt_dlp
 except ImportError:
     print("[ERROR] yt-dlp is not installed. Run: pip install yt-dlp")
@@ -619,52 +634,107 @@ def download_image_bytes(url: Optional[str]) -> Optional[bytes]:
         return None
 
 
-def embed_id3_metadata(mp3_path: Path, track: dict, cover_bytes: Optional[bytes]) -> bool:
+def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[bytes]) -> bool:
     """
-    Embed ID3v2.3 tags into MP3 files for full compatibility with
-    Windows Explorer, VLC, iTunes, Apple Music, and mobile players.
+    Embed metadata & cover art into audio files (MP3, FLAC, M4A, Opus, etc.)
+    for full compatibility with media players and file explorers.
     """
+    ext = audio_path.suffix.lower()
+    title = track.get("title", "")
+    artist = track.get("artist", "")
+    album = track.get("album_name") or title
+    track_num = track.get("track_number", 1)
+    disc_num = track.get("disc_number", 1)
+    release = track.get("release_date", "")
+
     try:
-        audio = MP3(str(mp3_path), ID3=ID3)
-        try:
-            audio.add_tags()
-        except Exception:
-            pass
+        if ext == ".mp3":
+            audio = MP3(str(audio_path), ID3=ID3)
+            try:
+                audio.add_tags()
+            except Exception:
+                pass
 
-        tags = audio.tags
-        title = track.get("title", "")
-        artist = track.get("artist", "")
-        album = track.get("album_name") or title
-        track_num = track.get("track_number", 1)
-        disc_num = track.get("disc_number", 1)
-        release = track.get("release_date", "")
-
-        tags.add(TIT2(encoding=3, text=title))
-        tags.add(TPE1(encoding=3, text=artist))
-        tags.add(TALB(encoding=3, text=album))
-        tags.add(TPE2(encoding=3, text=artist))
-        tags.add(TRCK(encoding=3, text=str(track_num)))
-        tags.add(TPOS(encoding=3, text=str(disc_num)))
-        if release:
-            tags.add(TDRC(encoding=3, text=release[:10]))
-        tags.add(COMM(
-            encoding=3, lang="eng", desc="Comment",
-            text="Downloaded with spotify-dl"
-        ))
-
-        if cover_bytes:
-            mime = "image/jpeg"
-            if cover_bytes[:4] == b"\x89PNG":
-                mime = "image/png"
-            tags.add(APIC(
-                encoding=3,
-                mime=mime,
-                type=3,  # front cover
-                desc="Cover",
-                data=cover_bytes,
+            tags = audio.tags
+            tags.add(TIT2(encoding=3, text=title))
+            tags.add(TPE1(encoding=3, text=artist))
+            tags.add(TALB(encoding=3, text=album))
+            tags.add(TPE2(encoding=3, text=artist))
+            tags.add(TRCK(encoding=3, text=str(track_num)))
+            tags.add(TPOS(encoding=3, text=str(disc_num)))
+            if release:
+                tags.add(TDRC(encoding=3, text=release[:10]))
+            tags.add(COMM(
+                encoding=3, lang="eng", desc="Comment",
+                text="Downloaded with spotify-dl"
             ))
 
-        audio.save(v2_version=3)
+            if cover_bytes:
+                mime = "image/jpeg"
+                if cover_bytes[:4] == b"\x89PNG":
+                    mime = "image/png"
+                tags.add(APIC(
+                    encoding=3,
+                    mime=mime,
+                    type=3,  # front cover
+                    desc="Cover",
+                    data=cover_bytes,
+                ))
+
+            audio.save(v2_version=3)
+            return True
+
+        elif ext == ".flac" and FLAC:
+            audio = FLAC(str(audio_path))
+            audio["title"] = title
+            audio["artist"] = artist
+            audio["album"] = album
+            audio["tracknumber"] = str(track_num)
+            audio["discnumber"] = str(disc_num)
+            if release:
+                audio["date"] = release[:10]
+            if cover_bytes:
+                pic = Picture()
+                pic.type = 3
+                pic.mime = "image/png" if cover_bytes[:4] == b"\x89PNG" else "image/jpeg"
+                pic.desc = "Cover"
+                pic.data = cover_bytes
+                audio.add_picture(pic)
+            audio.save()
+            return True
+
+        elif ext in (".m4a", ".mp4") and MP4:
+            audio = MP4(str(audio_path))
+            audio["\xa9nam"] = [title]
+            audio["\xa9ART"] = [artist]
+            audio["\xa9alb"] = [album]
+            try:
+                audio["trkn"] = [(int(track_num), 0)]
+            except Exception:
+                pass
+            try:
+                audio["disk"] = [(int(disc_num), 0)]
+            except Exception:
+                pass
+            if release:
+                audio["\xa9day"] = [release[:10]]
+            if cover_bytes:
+                img_fmt = MP4Cover.FORMAT_PNG if cover_bytes[:4] == b"\x89PNG" else MP4Cover.FORMAT_JPEG
+                audio["covr"] = [MP4Cover(cover_bytes, imageformat=img_fmt)]
+            audio.save()
+            return True
+
+        elif ext in (".opus", ".ogg") and OggOpus:
+            audio = OggOpus(str(audio_path))
+            audio["title"] = title
+            audio["artist"] = artist
+            audio["album"] = album
+            audio["tracknumber"] = str(track_num)
+            if release:
+                audio["date"] = release[:10]
+            audio.save()
+            return True
+
         return True
     except Exception as e:
         print(f"    {yellow('Warning: could not embed tags:')} {e}")

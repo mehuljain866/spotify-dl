@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 from tkinter import filedialog, messagebox
+from typing import Optional
 
 # Ensure stdout/stderr are safe on Windows even under pythonw.exe
 if sys.stdout is None:
@@ -56,8 +57,8 @@ class SpotifyDownloaderApp(ctk.CTk):
         ctk.set_default_color_theme("green")
 
         self.title("Spotify Downloader")
-        self.geometry("640x560")
-        self.minsize(580, 520)
+        self.geometry("660x650")
+        self.minsize(620, 580)
 
         # Set window icon if available
         icon_path = SCRIPT_DIR / "icon.ico"
@@ -72,31 +73,54 @@ class SpotifyDownloaderApp(ctk.CTk):
         self._cancel_requested = False
         self._download_thread: threading.Thread = None
 
-        # Load last used directory
+        # Load saved configuration
         self.config_file = SCRIPT_DIR / ".gui_config.json"
-        self.output_dir = self._load_last_dir()
+        self.saved_config = self._load_config()
+        self.output_dir = Path(self.saved_config.get("output_dir", str(Path.home() / "Music" / "Spotify Downloads")))
 
         self._create_widgets()
 
-    def _load_last_dir(self) -> Path:
+    def _load_config(self) -> dict:
         default_dir = Path.home() / "Music" / "Spotify Downloads"
+        defaults = {
+            "output_dir": str(default_dir),
+            "format": "mp3",
+            "bitrate": "320k",
+            "threads": "4 Songs at once (Fast)",
+            "limit": "",
+            "force": False,
+        }
         if self.config_file.exists():
             try:
                 import json
                 with open(self.config_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    saved = Path(data.get("output_dir", ""))
-                    if saved.exists():
-                        return saved
+                    if isinstance(data, dict):
+                        defaults.update(data)
             except Exception:
                 pass
-        return default_dir
+        return defaults
 
-    def _save_last_dir(self, directory: Path):
+    def _save_config(self):
         try:
             import json
+            folder_val = self.folder_entry.get().strip() if hasattr(self, "folder_entry") else ""
+            fmt_val = self.format_var.get().strip() if hasattr(self, "format_var") else "mp3"
+            br_val = self.bitrate_var.get().strip() if hasattr(self, "bitrate_var") else "320k"
+            th_val = self.threads_var.get() if hasattr(self, "threads_var") else "4 Songs at once (Fast)"
+            lim_val = self.limit_entry.get().strip() if hasattr(self, "limit_entry") else ""
+            force_val = self.force_var.get() if hasattr(self, "force_var") else False
+
+            cfg = {
+                "output_dir": folder_val or str(Path.home() / "Music" / "Spotify Downloads"),
+                "format": fmt_val,
+                "bitrate": br_val,
+                "threads": th_val,
+                "limit": lim_val,
+                "force": force_val,
+            }
             with open(self.config_file, "w", encoding="utf-8") as f:
-                json.dump({"output_dir": str(directory)}, f)
+                json.dump(cfg, f, indent=2)
         except Exception:
             pass
 
@@ -216,21 +240,65 @@ class SpotifyDownloaderApp(ctk.CTk):
         )
         open_folder_btn.pack(side="left")
 
-        # ── Speed / Concurrency Control ──────────────────────────────────────
-        speed_row = ctk.CTkFrame(main_frame, fg_color="transparent")
-        speed_row.pack(fill="x", pady=(0, 10))
+        # ── Download Settings Card ───────────────────────────────────────────
+        settings_frame = ctk.CTkFrame(main_frame, fg_color="#1E1E1E", corner_radius=10)
+        settings_frame.pack(fill="x", pady=(0, 14), padx=0)
 
-        speed_label = ctk.CTkLabel(
-            speed_row,
-            text="Download Speed (Parallel):",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="gray85",
+        settings_inner = ctk.CTkFrame(settings_frame, fg_color="transparent")
+        settings_inner.pack(fill="x", padx=14, pady=12)
+
+        settings_title = ctk.CTkLabel(
+            settings_inner,
+            text="Download Settings:",
+            font=ctk.CTkFont(size=13, weight="bold"),
         )
-        speed_label.pack(side="left", padx=(4, 8))
+        settings_title.pack(anchor="w", pady=(0, 8))
 
-        self.threads_var = ctk.StringVar(value="4 Songs at once (Fast)")
+        # Row 1: Format, Bitrate, Speed
+        row1 = ctk.CTkFrame(settings_inner, fg_color="transparent")
+        row1.pack(fill="x", pady=(0, 10))
+
+        fmt_frame = ctk.CTkFrame(row1, fg_color="transparent")
+        fmt_frame.pack(side="left", padx=(0, 16))
+        fmt_label = ctk.CTkLabel(fmt_frame, text="Format:", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray85")
+        fmt_label.pack(anchor="w", pady=(0, 3))
+        self.format_var = ctk.StringVar(value=self.saved_config.get("format", "mp3"))
+        self.format_menu = ctk.CTkOptionMenu(
+            fmt_frame,
+            values=["mp3", "m4a", "flac", "opus", "wav"],
+            variable=self.format_var,
+            width=90,
+            height=32,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.format_menu.pack(side="left")
+
+        bitrate_frame = ctk.CTkFrame(row1, fg_color="transparent")
+        bitrate_frame.pack(side="left", padx=(0, 16))
+        bitrate_label = ctk.CTkLabel(bitrate_frame, text="Bitrate:", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray85")
+        bitrate_label.pack(anchor="w", pady=(0, 3))
+        self.bitrate_var = ctk.StringVar(value=self.saved_config.get("bitrate", "320k"))
+        self.bitrate_menu = ctk.CTkOptionMenu(
+            bitrate_frame,
+            values=["320k", "256k", "192k", "128k"],
+            variable=self.bitrate_var,
+            width=95,
+            height=32,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.bitrate_menu.pack(side="left")
+
+        speed_frame = ctk.CTkFrame(row1, fg_color="transparent")
+        speed_frame.pack(side="left", fill="x", expand=True)
+        speed_label = ctk.CTkLabel(speed_frame, text="Parallel Speed:", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray85")
+        speed_label.pack(anchor="w", pady=(0, 3))
+        self.threads_var = ctk.StringVar(value=self.saved_config.get("threads", "4 Songs at once (Fast)"))
         self.threads_menu = ctk.CTkOptionMenu(
-            speed_row,
+            speed_frame,
             values=[
                 "1 Song at a time",
                 "3 Songs at once",
@@ -238,13 +306,46 @@ class SpotifyDownloaderApp(ctk.CTk):
                 "6 Songs at once (Turbo)",
             ],
             variable=self.threads_var,
-            width=210,
+            width=190,
             height=32,
             fg_color="#2A2A2A",
             button_color="#333333",
             button_hover_color="#444444",
         )
-        self.threads_menu.pack(side="right")
+        self.threads_menu.pack(anchor="w")
+
+        # Row 2: Limit & Overwrite checkbox
+        row2 = ctk.CTkFrame(settings_inner, fg_color="transparent")
+        row2.pack(fill="x")
+
+        limit_frame = ctk.CTkFrame(row2, fg_color="transparent")
+        limit_frame.pack(side="left", padx=(0, 24))
+        limit_label = ctk.CTkLabel(limit_frame, text="Track Limit:", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray85")
+        limit_label.pack(side="left", padx=(0, 8))
+        self.limit_entry = ctk.CTkEntry(
+            limit_frame,
+            placeholder_text="All tracks",
+            font=ctk.CTkFont(size=12),
+            width=100,
+            height=32,
+        )
+        saved_limit = self.saved_config.get("limit", "")
+        if saved_limit:
+            self.limit_entry.insert(0, str(saved_limit))
+        self.limit_entry.pack(side="left")
+
+        self.force_var = ctk.BooleanVar(value=self.saved_config.get("force", False))
+        self.force_checkbox = ctk.CTkCheckBox(
+            row2,
+            text="Overwrite existing tracks (force re-download)",
+            variable=self.force_var,
+            font=ctk.CTkFont(size=12),
+            checkmark_color="#000000",
+            fg_color="#1DB954",
+            hover_color="#1AA34A",
+            height=32,
+        )
+        self.force_checkbox.pack(side="left")
 
         # ── Download Action Button ───────────────────────────────────────────
         self.start_btn = ctk.CTkButton(
@@ -322,7 +423,7 @@ class SpotifyDownloaderApp(ctk.CTk):
         if chosen:
             self.folder_entry.delete(0, "end")
             self.folder_entry.insert(0, chosen)
-            self._save_last_dir(Path(chosen))
+            self._save_config()
 
     def _open_in_explorer(self):
         path_str = self.folder_entry.get().strip()
@@ -371,7 +472,30 @@ class SpotifyDownloaderApp(ctk.CTk):
 
         output_path = Path(folder_str).expanduser().resolve()
         output_path.mkdir(parents=True, exist_ok=True)
-        self._save_last_dir(output_path)
+
+        # Validate limit if entered
+        limit_str = self.limit_entry.get().strip()
+        limit_val = None
+        if limit_str:
+            if limit_str.isdigit() and int(limit_str) > 0:
+                limit_val = int(limit_str)
+            else:
+                messagebox.showwarning(
+                    "Invalid Limit",
+                    "Track limit must be a positive number (e.g. 20) or left empty for all tracks."
+                )
+                return
+
+        fmt = self.format_var.get().strip().lower() or "mp3"
+        bitrate = self.bitrate_var.get().strip() or "320k"
+        force_redownload = self.force_var.get()
+
+        # Determine max parallel workers from dropdown
+        speed_text = self.threads_var.get()
+        m = re.search(r"\d+", speed_text)
+        max_workers = int(m.group()) if m else 4
+
+        self._save_config()
 
         # Reset progress & start thread
         self.is_downloading = True
@@ -386,23 +510,32 @@ class SpotifyDownloaderApp(ctk.CTk):
             text_color="#FFFFFF",
         )
 
-        # Determine max parallel workers from dropdown
-        speed_text = self.threads_var.get()
-        m = re.search(r"\d+", speed_text)
-        max_workers = int(m.group()) if m else 4
-
         self._append_log("─" * 45)
         self._append_log(f"Starting download to: {output_path}")
-        self._append_log(f"Speed mode: {max_workers} songs at once")
+        settings_summary = f"Format: {fmt.upper()} @ {bitrate} | Speed: {max_workers} songs at once"
+        if limit_val:
+            settings_summary += f" | Limit: first {limit_val} tracks"
+        if force_redownload:
+            settings_summary += " | Force overwrite: ON"
+        self._append_log(settings_summary)
 
         self._download_thread = threading.Thread(
             target=self._run_download_worker,
-            args=(url, output_path, max_workers),
+            args=(url, output_path, max_workers, fmt, bitrate, limit_val, force_redownload),
             daemon=True,
         )
         self._download_thread.start()
 
-    def _run_download_worker(self, url: str, output_path: Path, max_workers: int = 4):
+    def _run_download_worker(
+        self,
+        url: str,
+        output_path: Path,
+        max_workers: int = 4,
+        fmt: str = "mp3",
+        bitrate: str = "320k",
+        limit: Optional[int] = None,
+        force_redownload: bool = False,
+    ):
         def progress_callback(status: str, prog: float, current_track: str = None):
             self.after(0, lambda s=status, p=prog, c=current_track: self._update_progress(s, p, c))
 
@@ -413,8 +546,10 @@ class SpotifyDownloaderApp(ctk.CTk):
             result = run_download(
                 playlist_url=url,
                 output_dir=output_path,
-                fmt="mp3",
-                bitrate="320k",
+                fmt=fmt,
+                bitrate=bitrate,
+                limit=limit,
+                force_redownload=force_redownload,
                 max_workers=max_workers,
                 callback=progress_callback,
                 cancel_check=cancel_check,
