@@ -1,4 +1,4 @@
-# 🎵 Spotify Downloader
+# Spotify Downloader
 
 A fast, modern desktop application and CLI that downloads Spotify playlists, albums, or individual tracks — with full ID3 metadata and high-resolution album art embedded.
 
@@ -8,23 +8,23 @@ A fast, modern desktop application and CLI that downloads Spotify playlists, alb
 
 ---
 
-## ⚡ 1-Line Quick Install
+## 1-Line Quick Install
 
 Install and launch **Spotify Downloader** with a single command:
 
-### 🪟 Windows (PowerShell)
+### Windows (PowerShell)
 ```powershell
 irm https://raw.githubusercontent.com/mehuljain866/spotify-dl/main/install.ps1 | iex
 ```
 
-### 🍎 macOS / 🐧 Linux (Terminal)
+### macOS / Linux (Terminal)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mehuljain866/spotify-dl/main/install.sh | bash
 ```
 
 ---
 
-## 📦 Single-File Standalone Downloads (No Python Required)
+## Single-File Standalone Downloads (No Python Required)
 
 Prefer a portable single-file app without installing Python? Download from [**Latest Releases**](https://github.com/mehuljain866/spotify-dl/releases/latest):
 
@@ -36,7 +36,7 @@ Prefer a portable single-file app without installing Python? Download from [**La
 
 ---
 
-## ✨ Features
+## Features
 
 - **Blazing Fast Parallel Downloads**: Download up to 4 or 6 songs at the same time concurrently for up to 5x faster downloads. Configurable in the GUI and CLI.
 - **Simple & Clean UI**: Enter or paste a link, pick your folder, choose your download speed, click **Start Download**, and watch real-time progress.
@@ -49,7 +49,7 @@ Prefer a portable single-file app without installing Python? Download from [**La
 
 ---
 
-## 🖥️ Running the Desktop App
+## Running the Desktop App
 
 1. **From your Desktop**: Double-click the **Spotify Downloader** shortcut.
 2. **From Terminal**:
@@ -59,7 +59,7 @@ Prefer a portable single-file app without installing Python? Download from [**La
 
 ---
 
-## 💻 Running via Command Line (CLI)
+## Running via Command Line (CLI)
 
 ```powershell
 # Download a playlist to a folder:

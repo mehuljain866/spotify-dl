@@ -88,7 +88,7 @@ jobs:
           prerelease: false
           files: final_assets/*
           body: |
-            ### 🎵 Spotify Downloader Standalone Releases
+            ### Spotify Downloader Standalone Releases
 
             Download the single-file executable for your platform:
             - **Windows**: `Spotify-Downloader-Windows.exe` (Run directly, no Python required)
