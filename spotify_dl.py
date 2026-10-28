@@ -72,7 +72,7 @@ import requests
 from bs4 import BeautifulSoup
 from mutagen.id3 import (
     APIC, COMM, ID3, ID3NoHeaderError,
-    TALB, TDRC, TIT2, TPE1, TPE2, TRCK, TPOS
+    TALB, TCMP, TDRC, TIT2, TPE1, TPE2, TRCK, TPOS
 )
 from mutagen.mp3 import MP3
 
@@ -248,6 +248,12 @@ def _fetch_playlist_spotapi(playlist_id: str) -> Tuple[dict, List[dict]]:
 
             album = data.get("albumOfTrack", {})
             album_name = album.get("name", "")
+            album_artists = [
+                a["profile"]["name"]
+                for a in album.get("artists", {}).get("items", [])
+                if "profile" in a
+            ]
+            album_artist = ", ".join(album_artists) if album_artists else (artists_list[0] if artists_list else "Unknown")
             release_date = album.get("date", {}).get("isoString", "")
             covers = album.get("coverArt", {}).get("sources", [])
             track_cover = None
@@ -265,6 +271,7 @@ def _fetch_playlist_spotapi(playlist_id: str) -> Tuple[dict, List[dict]]:
             tracks.append({
                 "title": title,
                 "artist": artist,
+                "album_artist": album_artist,
                 "album_name": album_name,
                 "release_date": release_date[:10] if release_date else "",
                 "cover_url": track_cover or cover_url,
@@ -304,9 +311,11 @@ def _fetch_playlist_embed(playlist_id: str) -> Tuple[dict, List[dict]]:
             continue
         uri = t.get("uri", "")
         track_id = uri.split(":")[-1] if uri else ""
+        t_artist = t.get("subtitle", "Unknown")
         tracks.append({
             "title": t.get("title", "Unknown"),
-            "artist": t.get("subtitle", "Unknown"),
+            "artist": t_artist,
+            "album_artist": t_artist.split(",")[0].strip() if t_artist else "Unknown",
             "cover_url": None,
             "track_number": idx,
             "disc_number": 1,
@@ -338,6 +347,7 @@ def _fetch_single_track(track_id: str) -> Tuple[dict, List[dict]]:
     track_info = {
         "title": entity.get("title", "Unknown"),
         "artist": artist_str,
+        "album_artist": artists[0] if artists else "Unknown",
         "cover_url": cover_url,
         "track_number": 1,
         "disc_number": 1,
@@ -382,6 +392,7 @@ def _fetch_album_tracks(album_id: str) -> Tuple[dict, List[dict]]:
         tracks.append({
             "title": t.get("title", "Unknown"),
             "artist": t.get("subtitle", album_artist),
+            "album_artist": album_artist,
             "cover_url": cover_url,
             "track_number": idx,
             "disc_number": 1,
@@ -639,15 +650,38 @@ def download_image_bytes(url: Optional[str]) -> Optional[bytes]:
 def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[bytes]) -> bool:
     """
     Embed metadata & cover art into audio files (MP3, FLAC, M4A, Opus, etc.)
-    for full compatibility with media players and file explorers.
+    for full compatibility with media players and file explorers (iTunes, Apple Music, VLC).
+    Ensures Album Artist (TPE2 / aART / albumartist) is correctly set so albums
+    with featured guest singers stay properly grouped into a single album in Apple Music/iTunes.
     """
     ext = audio_path.suffix.lower()
-    title = track.get("title", "")
-    artist = track.get("artist", "")
-    album = track.get("album_name") or title
+
+    def _clean(val: Any) -> str:
+        if val is None:
+            return ""
+        return str(val).replace("\xa0", " ").strip()
+
+    title = _clean(track.get("title", ""))
+    artist = _clean(track.get("artist", ""))
+    album = _clean(track.get("album_name") or title)
+
+    raw_aa = track.get("album_artist")
+    if raw_aa:
+        album_artist = _clean(raw_aa)
+    elif artist:
+        album_artist = artist.split(",")[0].strip()
+    else:
+        album_artist = "Unknown"
+
     track_num = track.get("track_number", 1)
     disc_num = track.get("disc_number", 1)
-    release = track.get("release_date", "")
+    release = _clean(track.get("release_date", ""))
+
+    is_compilation = bool(
+        track.get("is_compilation")
+        or album_artist.lower() in ("various artists", "soundtrack")
+        or "soundtrack" in album.lower()
+    )
 
     try:
         if ext == ".mp3":
@@ -661,9 +695,11 @@ def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[byte
             tags.add(TIT2(encoding=3, text=title))
             tags.add(TPE1(encoding=3, text=artist))
             tags.add(TALB(encoding=3, text=album))
-            tags.add(TPE2(encoding=3, text=artist))
+            tags.add(TPE2(encoding=3, text=album_artist))
             tags.add(TRCK(encoding=3, text=str(track_num)))
             tags.add(TPOS(encoding=3, text=str(disc_num)))
+            if is_compilation:
+                tags.add(TCMP(encoding=3, text="1"))
             if release:
                 tags.add(TDRC(encoding=3, text=release[:10]))
             tags.add(COMM(
@@ -691,6 +727,10 @@ def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[byte
             audio["title"] = title
             audio["artist"] = artist
             audio["album"] = album
+            if album_artist:
+                audio["albumartist"] = album_artist
+            if is_compilation:
+                audio["compilation"] = "1"
             audio["tracknumber"] = str(track_num)
             audio["discnumber"] = str(disc_num)
             if release:
@@ -710,6 +750,10 @@ def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[byte
             audio["\xa9nam"] = [title]
             audio["\xa9ART"] = [artist]
             audio["\xa9alb"] = [album]
+            if album_artist:
+                audio["aART"] = [album_artist]
+            if is_compilation:
+                audio["cpil"] = True
             try:
                 audio["trkn"] = [(int(track_num), 0)]
             except Exception:
@@ -731,6 +775,8 @@ def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[byte
             audio["title"] = title
             audio["artist"] = artist
             audio["album"] = album
+            if album_artist:
+                audio["albumartist"] = album_artist
             audio["tracknumber"] = str(track_num)
             if release:
                 audio["date"] = release[:10]
@@ -1133,6 +1179,154 @@ def batch_transcode_folder(
     return result
 
 
+def fix_library_album_tags(folder: Path, callback=None) -> dict:
+    """
+    Scans an audio folder and fixes fragmented/split albums for iTunes & Apple Music.
+    Unifies the Album Artist tag (TPE2 / aART / albumartist) across all tracks belonging
+    to each album and applies the iTunes compilation flag where appropriate.
+    Zero audio re-encoding: only updates tag headers instantaneously.
+    """
+    if not folder.exists():
+        raise FileNotFoundError(f"Folder not found: {folder}")
+
+    from collections import defaultdict, Counter
+
+    audio_files = [
+        f for f in folder.iterdir()
+        if f.is_file() and f.suffix.lower() in (".mp3", ".m4a", ".mp4", ".flac")
+    ]
+
+    total_files = len(audio_files)
+    if total_files == 0:
+        return {"total_files": 0, "fixed_files": 0, "albums_fixed": 0, "fixed_albums_list": []}
+
+    def _notify(status: str, prog: float):
+        if callback:
+            try:
+                callback(status, prog)
+            except Exception:
+                pass
+
+    _notify(f"Scanning {total_files} files for album grouping...", 0.0)
+
+    # Group files by Album Title
+    albums_map = defaultdict(list)
+    for idx, f in enumerate(audio_files):
+        ext = f.suffix.lower()
+        try:
+            if ext == ".mp3":
+                id3 = ID3(str(f))
+                alb = str(id3.get("TALB", "")).replace("\xa0", " ").strip()
+                art = str(id3.get("TPE1", "")).replace("\xa0", " ").strip()
+                tpe2 = str(id3.get("TPE2", "")).replace("\xa0", " ").strip()
+                if alb:
+                    albums_map[alb].append({
+                        "path": f, "ext": ext, "id3": id3,
+                        "album": alb, "artist": art, "album_artist": tpe2
+                    })
+            elif ext in (".m4a", ".mp4") and MP4:
+                mp4 = MP4(str(f))
+                alb = str(mp4.get("\xa9alb", [""])[0]).replace("\xa0", " ").strip()
+                art = str(mp4.get("\xa9ART", [""])[0]).replace("\xa0", " ").strip()
+                aart = str(mp4.get("aART", [""])[0]).replace("\xa0", " ").strip()
+                if alb:
+                    albums_map[alb].append({
+                        "path": f, "ext": ext, "mp4": mp4,
+                        "album": alb, "artist": art, "album_artist": aart
+                    })
+            elif ext == ".flac" and FLAC:
+                fl = FLAC(str(f))
+                alb = str(fl.get("album", [""])[0]).replace("\xa0", " ").strip()
+                art = str(fl.get("artist", [""])[0]).replace("\xa0", " ").strip()
+                albart = str(fl.get("albumartist", [""])[0]).replace("\xa0", " ").strip()
+                if alb:
+                    albums_map[alb].append({
+                        "path": f, "ext": ext, "flac": fl,
+                        "album": alb, "artist": art, "album_artist": albart
+                    })
+        except Exception:
+            pass
+
+    fixed_files = 0
+    fixed_albums_list = []
+
+    for alb_name, track_list in albums_map.items():
+        if not alb_name or len(track_list) == 0:
+            continue
+
+        lead_artists = [
+            t["artist"].split(",")[0].strip()
+            for t in track_list
+            if t["artist"]
+        ]
+        if not lead_artists:
+            continue
+
+        lead_counts = Counter(lead_artists)
+        top_lead, count = lead_counts.most_common(1)[0]
+
+        is_ost = (
+            "soundtrack" in alb_name.lower()
+            or "various" in alb_name.lower()
+            or (len(lead_counts) > 2 and count < len(track_list) / 2)
+        )
+        unified_album_artist = "Various Artists" if is_ost else top_lead
+
+        album_needed_fix = False
+        for t in track_list:
+            cur_aa = t.get("album_artist", "")
+            needs_update = (
+                cur_aa != unified_album_artist
+                or "\xa0" in t["artist"]
+                or "\xa0" in cur_aa
+            )
+            if not needs_update:
+                continue
+
+            album_needed_fix = True
+            ext = t["ext"]
+            try:
+                if ext == ".mp3":
+                    id3 = t["id3"]
+                    id3.add(TPE2(encoding=3, text=unified_album_artist))
+                    if id3.get("TPE1"):
+                        id3.add(TPE1(encoding=3, text=str(id3.get("TPE1")).replace("\xa0", " ").strip()))
+                    if id3.get("TALB"):
+                        id3.add(TALB(encoding=3, text=alb_name))
+                    if is_ost:
+                        id3.add(TCMP(encoding=3, text="1"))
+                    id3.save(v2_version=3)
+                    fixed_files += 1
+                elif ext in (".m4a", ".mp4") and MP4:
+                    mp4 = t["mp4"]
+                    mp4["aART"] = [unified_album_artist]
+                    if is_ost:
+                        mp4["cpil"] = True
+                    mp4.save()
+                    fixed_files += 1
+                elif ext == ".flac" and FLAC:
+                    fl = t["flac"]
+                    fl["albumartist"] = unified_album_artist
+                    if is_ost:
+                        fl["compilation"] = "1"
+                    fl.save()
+                    fixed_files += 1
+            except Exception:
+                pass
+
+        if album_needed_fix:
+            fixed_albums_list.append(f"{alb_name} -> {unified_album_artist}")
+
+    _notify(f"Album consolidation complete: {fixed_files} files updated across {len(fixed_albums_list)} albums.", 1.0)
+
+    return {
+        "total_files": total_files,
+        "fixed_files": fixed_files,
+        "albums_fixed": len(fixed_albums_list),
+        "fixed_albums_list": fixed_albums_list,
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main Pipeline
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1451,12 +1645,35 @@ Examples:
         help="Downsize / convert audio quality of all songs in a folder (e.g. --downsize ~/Music/Downloads --bitrate 192k)",
     )
     parser.add_argument(
+        "--fix-tags",
+        metavar="FOLDER",
+        default=None,
+        help="Fix fragmented albums for iTunes/Apple Music by unifying Album Artist tags without re-encoding audio",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version="spotify-dl 2.1.0",
     )
 
     args = parser.parse_args()
+
+    if args.fix_tags:
+        target_folder = Path(args.fix_tags).expanduser().resolve()
+        safe_print(f"\n{bold('=== Unifying Album Tags for iTunes & Apple Music ===')}")
+        safe_print(f"  Target Folder: {cyan(str(target_folder))}\n")
+        res = fix_library_album_tags(
+            target_folder,
+            callback=lambda msg, prog: safe_print(f"  [*] {msg}")
+        )
+        safe_print(f"\n  {green('[OK] Album Tag Fix Complete!')}")
+        safe_print(f"  Scanned Files : {res.get('total_files', 0)}")
+        safe_print(f"  Updated Tracks: {res.get('fixed_files', 0)}")
+        safe_print(f"  Fixed Albums  : {res.get('albums_fixed', 0)}")
+        for alb in res.get("fixed_albums_list", []):
+            safe_print(f"    - {alb}")
+        safe_print()
+        return
 
     if args.downsize:
         target_folder = Path(args.downsize).expanduser().resolve()

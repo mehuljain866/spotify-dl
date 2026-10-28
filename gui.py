@@ -52,6 +52,7 @@ from spotify_dl import (
     batch_transcode_folder,
     analyze_folder_audio,
     get_reducible_bitrate_options,
+    fix_library_album_tags,
 )
 
 
@@ -253,15 +254,27 @@ class SpotifyDownloaderApp(ctk.CTk):
 
         downsize_tool_btn = ctk.CTkButton(
             folder_tools_row,
-            text="Downsize / Adjust Audio Quality in Folder...",
-            font=ctk.CTkFont(size=12, weight="bold"),
+            text="Downsize Quality...",
+            font=ctk.CTkFont(size=11, weight="bold"),
             height=32,
             fg_color="#1E3A5F",
             hover_color="#2A5282",
             text_color="#64B5F6",
             command=self._open_downsize_dialog,
         )
-        downsize_tool_btn.pack(side="left", fill="x", expand=True)
+        downsize_tool_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        fix_tags_btn = ctk.CTkButton(
+            folder_tools_row,
+            text="Fix Split Albums (Apple Music)...",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            height=32,
+            fg_color="#2D2338",
+            hover_color="#453457",
+            text_color="#CE93D8",
+            command=self._open_fix_tags_dialog,
+        )
+        fix_tags_btn.pack(side="left", fill="x", expand=True)
 
         # ── Download Settings Card ───────────────────────────────────────────
         settings_frame = ctk.CTkFrame(main_frame, fg_color="#1E1E1E", corner_radius=10)
@@ -459,6 +472,12 @@ class SpotifyDownloaderApp(ctk.CTk):
         folder_str = self.folder_entry.get().strip()
         f_path = Path(folder_str) if folder_str else self.output_dir
         dialog = DownsizeDialog(self, f_path)
+        dialog.focus()
+
+    def _open_fix_tags_dialog(self):
+        folder_str = self.folder_entry.get().strip()
+        f_path = Path(folder_str) if folder_str else self.output_dir
+        dialog = FixAlbumTagsDialog(self, f_path)
         dialog.focus()
 
     def _append_log(self, text: str):
@@ -1199,6 +1218,204 @@ class DownsizeDialog(ctk.CTkToplevel):
         else:
             self._closed = True
             self.destroy()
+
+
+class FixAlbumTagsDialog(ctk.CTkToplevel):
+    """
+    Dialog to repair and unify album tags for Apple Music / iOS / iTunes.
+    Solves the 'split album' problem by ensuring Album Artist (TPE2 / aART)
+    is consistent across all tracks while preserving contributing artists in TPE1.
+    100% lossless: no audio transcoding.
+    """
+    def __init__(self, parent: ctk.CTk, default_folder: Path):
+        super().__init__(parent)
+
+        self.title("Fix Split Albums (Apple Music / iTunes)")
+        self.geometry("640x520")
+        self.minsize(580, 460)
+        self.transient(parent)
+
+        icon_path = SCRIPT_DIR / "icon.ico"
+        if icon_path.exists():
+            try:
+                self.iconbitmap(str(icon_path))
+            except Exception:
+                pass
+
+        self.is_processing = False
+        self._closed = False
+        self._msg_queue = queue.Queue()
+        self.selected_folder = Path(default_folder).expanduser().resolve()
+
+        self._create_widgets()
+        self._poll_queue()
+
+    def _poll_queue(self):
+        if self._closed:
+            return
+        try:
+            while not self._msg_queue.empty():
+                m_type, payload = self._msg_queue.get_nowait()
+                if m_type == "status":
+                    status, prog = payload
+                    self.status_label.configure(text=status)
+                    if prog >= 0:
+                        self.progress_bar.set(prog)
+                        self.pct_label.configure(text=f"{int(prog * 100)}%")
+                elif m_type == "log":
+                    self._append_log(payload)
+                elif m_type == "complete":
+                    res = payload
+                    self.is_processing = False
+                    self.start_btn.configure(state="normal", text="Fix Albums Again")
+                    self.progress_bar.set(1.0)
+                    self.pct_label.configure(text="100%")
+                    self.status_label.configure(
+                        text=f"Complete! Fixed {res.get('fixed_files', 0)} songs across {res.get('albums_fixed', 0)} albums.",
+                        text_color="#81C784"
+                    )
+                    self._append_log("\nAlbum consolidation finished!")
+                    self._append_log(f"Total files checked: {res.get('total_files', 0)}")
+                    self._append_log(f"Files updated: {res.get('fixed_files', 0)}")
+                    self._append_log(f"Albums consolidated: {res.get('albums_fixed', 0)}")
+                    for item in res.get("fixed_albums_list", []):
+                        self._append_log(f"  - {item}")
+                elif m_type == "error":
+                    self.is_processing = False
+                    self.start_btn.configure(state="normal", text="Scan & Fix Album Tags")
+                    self.status_label.configure(text=f"Error: {payload}", text_color="#E53935")
+                    self._append_log(f"Error: {payload}")
+        except Exception:
+            pass
+        if not self._closed:
+            self.after(50, self._poll_queue)
+
+    def _create_widgets(self):
+        container = ctk.CTkFrame(self, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=20, pady=16)
+
+        # Header
+        title = ctk.CTkLabel(
+            container,
+            text="Fix Split Albums for Apple Music & iOS",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color="#CE93D8",
+            anchor="w",
+        )
+        title.pack(fill="x", pady=(0, 2))
+
+        subtitle = ctk.CTkLabel(
+            container,
+            text="Unifies Album Artist tags so albums with featured singers (e.g. Gorillaz feat. Snoop Dogg)\nstay grouped into a single album in Apple Music and iTunes. 100% lossless (no audio re-encoding).",
+            font=ctk.CTkFont(size=11),
+            text_color="gray70",
+            justify="left",
+            anchor="w",
+        )
+        subtitle.pack(fill="x", pady=(0, 12))
+
+        # Folder card
+        folder_card = ctk.CTkFrame(container, fg_color="#1E1E1E", corner_radius=10)
+        folder_card.pack(fill="x", pady=(0, 12))
+        f_inner = ctk.CTkFrame(folder_card, fg_color="transparent")
+        f_inner.pack(fill="x", padx=14, pady=12)
+
+        ctk.CTkLabel(f_inner, text="Music Folder to Scan:", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray85").pack(anchor="w", pady=(0, 4))
+        row = ctk.CTkFrame(f_inner, fg_color="transparent")
+        row.pack(fill="x")
+        self.folder_entry = ctk.CTkEntry(row, height=32, font=ctk.CTkFont(size=12))
+        self.folder_entry.insert(0, str(self.selected_folder))
+        self.folder_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        browse_btn = ctk.CTkButton(row, text="Browse...", width=80, height=32, command=self._browse_folder)
+        browse_btn.pack(side="left")
+
+        # Action Buttons
+        btn_row = ctk.CTkFrame(container, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(0, 10))
+
+        self.start_btn = ctk.CTkButton(
+            btn_row,
+            text="Scan & Fix Album Tags",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=36,
+            fg_color="#7B1FA2",
+            hover_color="#9C27B0",
+            command=self._start_fix,
+        )
+        self.start_btn.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        close_btn = ctk.CTkButton(
+            btn_row,
+            text="Close",
+            width=90,
+            height=36,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=self._close,
+        )
+        close_btn.pack(side="left")
+
+        # Progress row
+        p_row = ctk.CTkFrame(container, fg_color="transparent")
+        p_row.pack(fill="x", pady=(0, 4))
+        self.status_label = ctk.CTkLabel(p_row, text="Ready to scan and fix tags.", font=ctk.CTkFont(size=11), text_color="gray80", anchor="w")
+        self.status_label.pack(side="left", fill="x", expand=True)
+        self.pct_label = ctk.CTkLabel(p_row, text="0%", font=ctk.CTkFont(size=11), text_color="gray60")
+        self.pct_label.pack(side="right")
+
+        self.progress_bar = ctk.CTkProgressBar(container, height=6)
+        self.progress_bar.set(0.0)
+        self.progress_bar.pack(fill="x", pady=(0, 10))
+
+        # Log box
+        self.log_box = ctk.CTkTextbox(container, height=160, font=ctk.CTkFont(family="Consolas", size=10), fg_color="#141414")
+        self.log_box.pack(fill="both", expand=True)
+        self.log_box.insert("end", "Click 'Scan & Fix Album Tags' to consolidate split albums.\nYour music audio files will remain 100% byte-for-byte identical; only the ID3/Apple grouping tags are updated.\n")
+        self.log_box.configure(state="disabled")
+
+    def _browse_folder(self):
+        f = ctk.filedialog.askdirectory(title="Select Music Folder", initialdir=str(self.selected_folder))
+        if f:
+            self.selected_folder = Path(f).resolve()
+            self.folder_entry.delete(0, "end")
+            self.folder_entry.insert(0, str(self.selected_folder))
+
+    def _append_log(self, text: str):
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", f"{text}\n")
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+
+    def _start_fix(self):
+        if self.is_processing:
+            return
+        f_path = Path(self.folder_entry.get().strip()).expanduser().resolve()
+        if not f_path.exists():
+            self.status_label.configure(text="Folder does not exist", text_color="#E53935")
+            return
+
+        self.is_processing = True
+        self.start_btn.configure(state="disabled", text="Fixing Tags...")
+        self.status_label.configure(text="Scanning and fixing album tags...", text_color="#CE93D8")
+        self.progress_bar.set(0.1)
+
+        def _worker():
+            try:
+                def cb(msg, prog):
+                    self._msg_queue.put(("status", (msg, prog)))
+                    self._msg_queue.put(("log", msg))
+
+                res = fix_library_album_tags(f_path, callback=cb)
+                self._msg_queue.put(("complete", res))
+            except Exception as exc:
+                self._msg_queue.put(("error", str(exc)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _close(self):
+        self._closed = True
+        self.destroy()
 
 
 def launch():

@@ -90,6 +90,7 @@ python spotify_dl.py --downsize "C:\Music\MyPlaylist" --bitrate 192k
 | `--force` | Re-download songs even if already present | `False` |
 | `--limit` | Limit download to first N tracks | `None` (all) |
 | `--downsize` | Downsize/transcode all songs in a folder to target bitrate | `None` |
+| `--fix-tags` | Fix fragmented albums for iTunes/Apple Music by unifying Album Artist | `None` |
 
 ---
 
@@ -113,3 +114,18 @@ If your music library occupies too much storage space (e.g. downloaded at 320 kb
    ```
 
 > **Note on Upgrading Audio Quality**: Re-encoding lower-bitrate audio files to higher bitrates cannot restore lost frequencies. To truly upgrade lower-bitrate tracks to pristine 320 kbps, check **Overwrite existing tracks (force re-download)** in the main window and click **Start Download** — Spotify Downloader will re-fetch the original 320k source streams directly from Spotify.
+
+---
+
+## Apple Music and iTunes Album Grouping (Fix Split Albums)
+
+If an album with featured artists (like Gorillaz with Snoop Dogg or Little Dragon) splits into multiple separate album covers in Apple Music or iOS:
+
+1. **Why It Happens**: Apple Music and iOS use the **Album Artist** tag (`TPE2` in MP3, `aART` in M4A, `albumartist` in FLAC) to group tracks into albums. If each track has a different artist due to guest singers and the Album Artist is inconsistent, Apple Music creates separate 1-song albums for every guest.
+2. **How to Fix (100% Lossless)**:
+   - **In the Desktop App**: In the Download Folder card, click **Fix Split Albums (Apple Music)...** and click **Scan & Fix Album Tags**.
+   - **In the Terminal (CLI)**:
+     ```powershell
+     python spotify_dl.py --fix-tags "C:\Users\mehul\Music\Spotify Downloads"
+     ```
+   - All tracks in the album will be grouped under the primary artist (e.g. `Gorillaz`) while preserving all guest credits on individual songs. Zero audio re-encoding is performed.
