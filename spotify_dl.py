@@ -904,6 +904,7 @@ def analyze_folder_audio(folder: Path) -> dict:
         return {
             "total_files": 0,
             "total_bytes": 0,
+            "total_mb": 0.0,
             "max_bitrate": 0,
             "min_bitrate": 0,
             "avg_bitrate": 0,
@@ -923,6 +924,7 @@ def analyze_folder_audio(folder: Path) -> dict:
         return {
             "total_files": 0,
             "total_bytes": 0,
+            "total_mb": 0.0,
             "max_bitrate": 0,
             "min_bitrate": 0,
             "avg_bitrate": 0,
@@ -930,6 +932,7 @@ def analyze_folder_audio(folder: Path) -> dict:
         }
 
     total_bytes = sum(f.stat().st_size for f in files)
+    total_mb = round(total_bytes / (1024 * 1024), 2)
     bitrates = []
     has_lossless = False
 
@@ -948,6 +951,7 @@ def analyze_folder_audio(folder: Path) -> dict:
     return {
         "total_files": len(files),
         "total_bytes": total_bytes,
+        "total_mb": total_mb,
         "max_bitrate": max_br,
         "min_bitrate": min_br,
         "avg_bitrate": avg_br,
