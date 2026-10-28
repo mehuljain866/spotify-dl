@@ -97,9 +97,13 @@ python spotify_dl.py --downsize "C:\Music\MyPlaylist" --bitrate 192k
 
 If your music library occupies too much storage space (e.g. downloaded at 320 kbps), you can easily downsize your existing music files:
 
+<p align="center">
+  <img src="assets/screenshot-downsize.png" alt="Downsize and Adjust Audio Quality" width="550" />
+</p>
+
 1. **In the Desktop App**:
    - In the **Download Folder** card, click **Downsize / Adjust Audio Quality in Folder...**.
-   - Choose your target bitrate (e.g. `192k` saves ~40% space, `128k` saves ~60% space).
+   - The app automatically inspects the actual encoding of all songs in the folder and presents only valid, reducible bitrate options along with calculated storage savings (e.g. `192k saves ~25% [~948 MB]`, `128k saves ~50% [~1.85 GB]`).
    - Select whether to replace files in-place or output to a separate subfolder.
    - Click **Start Downsizing** — all album art, ID3 tags, and artist info are preserved intact.
 
