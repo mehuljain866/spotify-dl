@@ -45,7 +45,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from spotify_dl import run_download, extract_spotify_id
+from spotify_dl import run_download, extract_spotify_id, batch_transcode_folder
 
 
 class SpotifyDownloaderApp(ctk.CTk):
@@ -240,6 +240,22 @@ class SpotifyDownloaderApp(ctk.CTk):
         )
         open_folder_btn.pack(side="left")
 
+        # Tool button for downsizing / converting quality of songs in folder
+        folder_tools_row = ctk.CTkFrame(folder_inner, fg_color="transparent")
+        folder_tools_row.pack(fill="x", pady=(8, 0))
+
+        downsize_tool_btn = ctk.CTkButton(
+            folder_tools_row,
+            text="Downsize / Adjust Audio Quality in Folder...",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            height=32,
+            fg_color="#1E3A5F",
+            hover_color="#2A5282",
+            text_color="#64B5F6",
+            command=self._open_downsize_dialog,
+        )
+        downsize_tool_btn.pack(side="left", fill="x", expand=True)
+
         # ── Download Settings Card ───────────────────────────────────────────
         settings_frame = ctk.CTkFrame(main_frame, fg_color="#1E1E1E", corner_radius=10)
         settings_frame.pack(fill="x", pady=(0, 14), padx=0)
@@ -432,6 +448,12 @@ class SpotifyDownloaderApp(ctk.CTk):
             p.mkdir(parents=True, exist_ok=True)
         os.startfile(str(p))
 
+    def _open_downsize_dialog(self):
+        folder_str = self.folder_entry.get().strip()
+        f_path = Path(folder_str) if folder_str else self.output_dir
+        dialog = DownsizeDialog(self, f_path)
+        dialog.focus()
+
     def _append_log(self, text: str):
         self.log_textbox.configure(state="normal")
         self.log_textbox.insert("end", f"{text}\n")
@@ -619,6 +641,471 @@ class SpotifyDownloaderApp(ctk.CTk):
         if error_details:
             self._append_log(error_details)
         messagebox.showerror("Download Error", f"An error occurred while downloading:\n\n{error_msg}")
+
+
+class DownsizeDialog(ctk.CTkToplevel):
+    def __init__(self, parent, default_folder: Path):
+        super().__init__(parent)
+
+        self.title("Downsize & Adjust Audio Quality")
+        self.geometry("640x670")
+        self.minsize(580, 580)
+        self.transient(parent)
+
+        icon_path = SCRIPT_DIR / "icon.ico"
+        if icon_path.exists():
+            try:
+                self.iconbitmap(str(icon_path))
+            except Exception:
+                pass
+
+        self.is_processing = False
+        self._cancel_requested = False
+        self._work_thread: Optional[threading.Thread] = None
+        self.selected_folder = Path(default_folder).expanduser().resolve()
+
+        self._create_widgets()
+        self._scan_folder_stats()
+
+    def _create_widgets(self):
+        container = ctk.CTkFrame(self, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=20, pady=16)
+
+        # Header
+        title = ctk.CTkLabel(
+            container,
+            text="Downsize & Adjust Audio Quality",
+            font=ctk.CTkFont(size=20, weight="bold"),
+            text_color="#64B5F6",
+        )
+        title.pack(anchor="w", pady=(0, 2))
+
+        sub = ctk.CTkLabel(
+            container,
+            text="Reduce file sizes or adjust bitrates for all music in a folder (ID3 tags & cover art preserved)",
+            font=ctk.CTkFont(size=11),
+            text_color="gray70",
+        )
+        sub.pack(anchor="w", pady=(0, 12))
+
+        # Folder selection card
+        folder_card = ctk.CTkFrame(container, fg_color="#1E1E1E", corner_radius=10)
+        folder_card.pack(fill="x", pady=(0, 10))
+        folder_inner = ctk.CTkFrame(folder_card, fg_color="transparent")
+        folder_inner.pack(fill="x", padx=12, pady=10)
+
+        f_label = ctk.CTkLabel(
+            folder_inner,
+            text="Folder with Music:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        f_label.pack(anchor="w", pady=(0, 4))
+
+        f_row = ctk.CTkFrame(folder_inner, fg_color="transparent")
+        f_row.pack(fill="x")
+
+        self.folder_entry = ctk.CTkEntry(f_row, font=ctk.CTkFont(size=12), height=34)
+        self.folder_entry.insert(0, str(self.selected_folder))
+        self.folder_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        browse_btn = ctk.CTkButton(
+            f_row,
+            text="Browse...",
+            width=75,
+            height=34,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=self._browse_folder,
+        )
+        browse_btn.pack(side="left")
+
+        self.folder_stats_label = ctk.CTkLabel(
+            folder_inner,
+            text="Scanning folder for music...",
+            font=ctk.CTkFont(size=11),
+            text_color="#81C784",
+        )
+        self.folder_stats_label.pack(anchor="w", pady=(6, 0))
+
+        # Settings card
+        settings_card = ctk.CTkFrame(container, fg_color="#1E1E1E", corner_radius=10)
+        settings_card.pack(fill="x", pady=(0, 10))
+        settings_inner = ctk.CTkFrame(settings_card, fg_color="transparent")
+        settings_inner.pack(fill="x", padx=12, pady=10)
+
+        s_title = ctk.CTkLabel(
+            settings_inner,
+            text="Target Quality & Settings:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        s_title.pack(anchor="w", pady=(0, 8))
+
+        row1 = ctk.CTkFrame(settings_inner, fg_color="transparent")
+        row1.pack(fill="x", pady=(0, 8))
+
+        # Target Bitrate
+        br_frame = ctk.CTkFrame(row1, fg_color="transparent")
+        br_frame.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        br_label = ctk.CTkLabel(br_frame, text="Target Bitrate (Downsize to):", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray85")
+        br_label.pack(anchor="w", pady=(0, 2))
+        self.bitrate_var = ctk.StringVar(value="192k (Standard / ~40% space saved)")
+        self.bitrate_menu = ctk.CTkOptionMenu(
+            br_frame,
+            values=[
+                "128k (Smallest / ~60% space saved)",
+                "160k (Compact)",
+                "192k (Standard / ~40% space saved)",
+                "256k (High Quality)",
+                "320k (Maximum Quality)",
+            ],
+            variable=self.bitrate_var,
+            height=32,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.bitrate_menu.pack(fill="x")
+
+        # Speed / Workers
+        speed_frame = ctk.CTkFrame(row1, fg_color="transparent")
+        speed_frame.pack(side="left", fill="x", expand=True)
+        speed_label = ctk.CTkLabel(speed_frame, text="Processing Speed:", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray85")
+        speed_label.pack(anchor="w", pady=(0, 2))
+        self.speed_var = ctk.StringVar(value="4 Songs at once (Fast)")
+        self.speed_menu = ctk.CTkOptionMenu(
+            speed_frame,
+            values=[
+                "1 Song at a time",
+                "2 Songs at once",
+                "4 Songs at once (Fast)",
+                "6 Songs at once (Turbo)",
+            ],
+            variable=self.speed_var,
+            height=32,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.speed_menu.pack(fill="x")
+
+        row2 = ctk.CTkFrame(settings_inner, fg_color="transparent")
+        row2.pack(fill="x", pady=(0, 4))
+
+        # Output Mode
+        mode_frame = ctk.CTkFrame(row2, fg_color="transparent")
+        mode_frame.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        mode_label = ctk.CTkLabel(mode_frame, text="Output Mode:", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray85")
+        mode_label.pack(anchor="w", pady=(0, 2))
+        self.mode_var = ctk.StringVar(value="Replace files in-place (frees space immediately)")
+        self.mode_menu = ctk.CTkOptionMenu(
+            mode_frame,
+            values=[
+                "Replace files in-place (frees space immediately)",
+                "Save to new subfolder",
+            ],
+            variable=self.mode_var,
+            height=32,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.mode_menu.pack(fill="x")
+
+        # Format
+        fmt_frame = ctk.CTkFrame(row2, fg_color="transparent")
+        fmt_frame.pack(side="left", fill="x", expand=True)
+        fmt_label = ctk.CTkLabel(fmt_frame, text="Output Format:", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray85")
+        fmt_label.pack(anchor="w", pady=(0, 2))
+        self.fmt_var = ctk.StringVar(value="Keep original format")
+        self.fmt_menu = ctk.CTkOptionMenu(
+            fmt_frame,
+            values=[
+                "Keep original format",
+                "mp3",
+                "m4a",
+                "opus",
+                "flac",
+            ],
+            variable=self.fmt_var,
+            height=32,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.fmt_menu.pack(fill="x")
+
+        # Note on audio upgrade
+        tip_label = ctk.CTkLabel(
+            settings_inner,
+            text="Tip: To truly upgrade lower-bitrate songs to 320k, enable 'Overwrite existing tracks' on the main window to re-download the original Spotify source streams.",
+            font=ctk.CTkFont(size=10),
+            text_color="gray55",
+            wraplength=560,
+            justify="left",
+        )
+        tip_label.pack(anchor="w", pady=(6, 0))
+
+        # Action Buttons
+        btn_row = ctk.CTkFrame(container, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(0, 10))
+
+        self.start_btn = ctk.CTkButton(
+            btn_row,
+            text="Start Downsizing",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            height=38,
+            fg_color="#1DB954",
+            hover_color="#1AA34A",
+            text_color="#000000",
+            command=self._on_start_click,
+        )
+        self.start_btn.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        self.close_btn = ctk.CTkButton(
+            btn_row,
+            text="Close",
+            width=80,
+            height=38,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=self._on_close,
+        )
+        self.close_btn.pack(side="left")
+
+        # Progress & Results Card
+        progress_card = ctk.CTkFrame(container, fg_color="#1E1E1E", corner_radius=10)
+        progress_card.pack(fill="both", expand=True)
+        progress_inner = ctk.CTkFrame(progress_card, fg_color="transparent")
+        progress_inner.pack(fill="both", expand=True, padx=12, pady=10)
+
+        header_row = ctk.CTkFrame(progress_inner, fg_color="transparent")
+        header_row.pack(fill="x", pady=(0, 2))
+
+        self.status_label = ctk.CTkLabel(
+            header_row,
+            text="Ready",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            anchor="w",
+        )
+        self.status_label.pack(side="left", fill="x", expand=True)
+
+        self.percent_label = ctk.CTkLabel(
+            header_row,
+            text="0%",
+            font=ctk.CTkFont(size=11),
+            text_color="gray70",
+        )
+        self.percent_label.pack(side="right")
+
+        self.progress_bar = ctk.CTkProgressBar(
+            progress_inner,
+            height=8,
+            progress_color="#64B5F6",
+            fg_color="#333333",
+        )
+        self.progress_bar.set(0.0)
+        self.progress_bar.pack(fill="x", pady=(2, 6))
+
+        self.log_box = ctk.CTkTextbox(
+            progress_inner,
+            height=110,
+            font=ctk.CTkFont(family="Consolas", size=10),
+            fg_color="#121212",
+            text_color="gray85",
+            corner_radius=6,
+        )
+        self.log_box.pack(fill="both", expand=True)
+        self.log_box.insert("end", "Select your target bitrate and click 'Start Downsizing'.\n")
+        self.log_box.configure(state="disabled")
+
+    def _browse_folder(self):
+        if self.is_processing:
+            return
+        chosen = filedialog.askdirectory(initialdir=str(self.selected_folder))
+        if chosen:
+            self.selected_folder = Path(chosen)
+            self.folder_entry.delete(0, "end")
+            self.folder_entry.insert(0, str(self.selected_folder))
+            self._scan_folder_stats()
+
+    def _scan_folder_stats(self):
+        def _worker():
+            f_path = Path(self.folder_entry.get().strip()).expanduser().resolve()
+            if not f_path.exists():
+                self.after(0, lambda: self.folder_stats_label.configure(text="Folder does not exist", text_color="#E53935"))
+                return
+            audio_exts = {".mp3", ".m4a", ".flac", ".opus", ".wav", ".ogg"}
+            try:
+                files = [f for f in f_path.iterdir() if f.is_file() and f.suffix.lower() in audio_exts]
+                count = len(files)
+                total_mb = sum(f.stat().st_size for f in files) / (1024 * 1024)
+                if total_mb > 1024:
+                    size_str = f"{total_mb/1024:.2f} GB"
+                else:
+                    size_str = f"{total_mb:.1f} MB"
+                text = f"Found {count} audio files | Total Size: {size_str}"
+                color = "#81C784" if count > 0 else "gray60"
+            except Exception as e:
+                text = f"Error scanning folder: {e}"
+                color = "#E53935"
+            self.after(0, lambda t=text, c=color: self.folder_stats_label.configure(text=t, text_color=c))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _append_log(self, text: str):
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", f"{text}\n")
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+
+    def _on_start_click(self):
+        if self.is_processing:
+            self._cancel_requested = True
+            self.status_label.configure(text="Cancelling...")
+            self.start_btn.configure(state="disabled", text="Stopping...")
+            return
+
+        f_path = Path(self.folder_entry.get().strip()).expanduser().resolve()
+        if not f_path.exists():
+            messagebox.showerror("Invalid Folder", "Please choose a valid folder containing music.")
+            return
+
+        # Bitrate
+        raw_br = self.bitrate_var.get()
+        m = re.search(r"\d+k", raw_br)
+        target_bitrate = m.group() if m else "192k"
+
+        # Format
+        fmt_choice = self.fmt_var.get().lower()
+        target_fmt = None if "original" in fmt_choice else fmt_choice
+
+        # In place or subfolder
+        in_place = "in-place" in self.mode_var.get()
+        output_dir = None
+        if not in_place:
+            output_dir = f_path / f"Downsized_{target_bitrate}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Workers
+        speed_str = self.speed_var.get()
+        m_speed = re.search(r"\d+", speed_str)
+        workers = int(m_speed.group()) if m_speed else 4
+
+        self.is_processing = True
+        self._cancel_requested = False
+        self.progress_bar.set(0.0)
+        self.percent_label.configure(text="0%")
+        self.start_btn.configure(
+            text="⏹ Cancel",
+            fg_color="#E53935",
+            hover_color="#C62828",
+            text_color="#FFFFFF",
+        )
+
+        self._append_log("─" * 45)
+        self._append_log(f"Starting downsizing: {f_path}")
+        self._append_log(f"Target Bitrate: {target_bitrate} | Mode: {'In-place replacement' if in_place else str(output_dir)}")
+
+        self._work_thread = threading.Thread(
+            target=self._run_downsize_worker,
+            args=(f_path, target_bitrate, target_fmt, in_place, output_dir, workers),
+            daemon=True,
+        )
+        self._work_thread.start()
+
+    def _run_downsize_worker(self, f_path: Path, target_bitrate: str, target_fmt: Optional[str], in_place: bool, output_dir: Optional[Path], workers: int):
+        def _cb(status: str, prog: float, stats: dict):
+            self.after(0, lambda s=status, p=prog: self._update_progress(s, p))
+
+        def _cancel() -> bool:
+            return self._cancel_requested
+
+        try:
+            res = batch_transcode_folder(
+                folder=f_path,
+                target_bitrate=target_bitrate,
+                target_fmt=target_fmt,
+                in_place=in_place,
+                output_dir=output_dir,
+                max_workers=workers,
+                callback=_cb,
+                cancel_check=_cancel,
+            )
+            self.after(0, lambda r=res: self._on_downsize_complete(r))
+        except Exception as e:
+            self.after(0, lambda err=str(e): self._on_downsize_error(err))
+
+    def _update_progress(self, status: str, prog: float):
+        try:
+            self.status_label.configure(text=status)
+            if prog >= 0.0:
+                self.progress_bar.set(min(1.0, max(0.0, prog)))
+                pct = int(min(1.0, max(0.0, prog)) * 100)
+                self.percent_label.configure(text=f"{pct}%")
+            if "Completed:" in status:
+                self._append_log(status)
+        except Exception:
+            pass
+
+    def _on_downsize_complete(self, res: dict):
+        self.is_processing = False
+        self.start_btn.configure(
+            state="normal",
+            text="Start Downsizing",
+            fg_color="#1DB954",
+            hover_color="#1AA34A",
+            text_color="#000000",
+        )
+
+        if res.get("cancelled"):
+            self.status_label.configure(text="Downsizing cancelled.")
+            self._append_log("Operation was cancelled.")
+            return
+
+        saved_mb = res.get("saved_bytes", 0) / (1024 * 1024)
+        orig_mb = res.get("original_bytes", 0) / (1024 * 1024)
+        new_mb = res.get("new_bytes", 0) / (1024 * 1024)
+
+        if orig_mb > 1024:
+            size_summary = f"{orig_mb/1024:.2f} GB -> {new_mb/1024:.2f} GB"
+        else:
+            size_summary = f"{orig_mb:.1f} MB -> {new_mb:.1f} MB"
+
+        if saved_mb > 1024:
+            saved_str = f"{saved_mb/1024:.2f} GB"
+        else:
+            saved_str = f"{saved_mb:.1f} MB"
+
+        msg = f"Done! Downsized {res.get('processed', 0)} files.\nSize: {size_summary}\nStorage Saved: {saved_str}!"
+        self.status_label.configure(text=f"Done! Storage saved: {saved_str}")
+        self.progress_bar.set(1.0)
+        self.percent_label.configure(text="100%")
+        self._append_log("─" * 45)
+        self._append_log(msg)
+        self._scan_folder_stats()
+
+        messagebox.showinfo("Downsizing Complete", msg)
+
+    def _on_downsize_error(self, err: str):
+        self.is_processing = False
+        self.start_btn.configure(
+            state="normal",
+            text="Start Downsizing",
+            fg_color="#1DB954",
+            hover_color="#1AA34A",
+            text_color="#000000",
+        )
+        self.status_label.configure(text=f"Error: {err}")
+        self._append_log(f"ERROR: {err}")
+        messagebox.showerror("Downsizing Error", f"An error occurred:\n\n{err}")
+
+    def _on_close(self):
+        if self.is_processing:
+            if messagebox.askyesno("Confirm Stop", "Downsizing is in progress. Stop and close?"):
+                self._cancel_requested = True
+                self.destroy()
+        else:
+            self.destroy()
 
 
 def launch():

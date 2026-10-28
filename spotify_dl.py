@@ -22,6 +22,8 @@ import json
 import os
 import re
 import sys
+import shutil
+import subprocess
 import threading
 import time
 import unicodedata
@@ -742,6 +744,259 @@ def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[byte
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Audio Transcoding & Downsizing (Quality Adjustment)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def get_ffmpeg_executable() -> Optional[str]:
+    """Find ffmpeg in PATH or common Windows / WinGet install locations."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+
+    if sys.platform == "win32":
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            winget_pkgs = Path(local_app) / "Microsoft" / "WinGet" / "Packages"
+            if winget_pkgs.exists():
+                try:
+                    for f in winget_pkgs.glob("**/ffmpeg.exe"):
+                        return str(f)
+                except Exception:
+                    pass
+            for f in (Path(local_app) / "Programs").glob("**/ffmpeg.exe"):
+                return str(f)
+        prog_files = Path(os.environ.get("ProgramFiles", "C:\\Program Files"))
+        if prog_files.exists():
+            try:
+                for f in prog_files.glob("**/ffmpeg.exe"):
+                    return str(f)
+            except Exception:
+                pass
+    return None
+
+
+def transcode_audio_file(
+    src_file: Path,
+    dest_file: Path,
+    target_bitrate: str = "192k",
+    target_fmt: Optional[str] = None,
+) -> bool:
+    """
+    Transcode an audio file to a target bitrate / format while preserving
+    all ID3 / Vorbis / MP4 metadata and embedded album art.
+    """
+    ffmpeg_exe = get_ffmpeg_executable()
+    if not ffmpeg_exe:
+        raise RuntimeError("FFmpeg is required for audio downsizing but was not found.")
+
+    out_ext = f".{target_fmt.lower().strip('.')}" if target_fmt else src_file.suffix.lower()
+    temp_out = dest_file.with_name(f"{dest_file.stem}_transcoding_{int(time.time()*1000)}.tmp{out_ext}")
+
+    try:
+        # Run ffmpeg transcode with target bitrate
+        cmd = [
+            ffmpeg_exe,
+            "-y",
+            "-i", str(src_file),
+            "-vn",
+            "-b:a", target_bitrate,
+            str(temp_out),
+        ]
+        kwargs = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
+        p = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **kwargs
+        )
+        if p.returncode != 0 or not temp_out.exists() or temp_out.stat().st_size == 0:
+            if temp_out.exists():
+                try:
+                    temp_out.unlink()
+                except Exception:
+                    pass
+            return False
+
+        # Copy metadata & album art
+        src_ext = src_file.suffix.lower()
+        if src_ext == ".mp3" and out_ext == ".mp3":
+            try:
+                from mutagen.id3 import ID3
+                tags = ID3(str(src_file))
+                tags.save(str(temp_out), v2_version=3)
+            except Exception:
+                pass
+        elif src_ext == ".flac" and out_ext == ".flac" and FLAC:
+            try:
+                tags = FLAC(str(src_file))
+                tags.save(str(temp_out))
+            except Exception:
+                pass
+        elif src_ext in (".m4a", ".mp4") and out_ext in (".m4a", ".mp4") and MP4:
+            try:
+                tags = MP4(str(src_file))
+                tags.save(str(temp_out))
+            except Exception:
+                pass
+        else:
+            # Cross-format: extract basic tags and cover art, then re-embed
+            try:
+                cover_bytes = None
+                track_info = {}
+                if src_ext == ".mp3":
+                    from mutagen.id3 import ID3
+                    id3 = ID3(str(src_file))
+                    track_info["title"] = str(id3.get("TIT2", ""))
+                    track_info["artist"] = str(id3.get("TPE1", ""))
+                    track_info["album_name"] = str(id3.get("TALB", ""))
+                    for k in id3.keys():
+                        if k.startswith("APIC"):
+                            cover_bytes = id3[k].data
+                            break
+                embed_id3_metadata(temp_out, track_info, cover_bytes)
+            except Exception:
+                pass
+
+        # Atomic replace or move
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        if dest_file.exists():
+            temp_out.replace(dest_file)
+        else:
+            temp_out.rename(dest_file)
+
+        return True
+    except Exception:
+        if temp_out.exists():
+            try:
+                temp_out.unlink()
+            except Exception:
+                pass
+        return False
+
+
+def batch_transcode_folder(
+    folder: Path,
+    target_bitrate: str = "192k",
+    target_fmt: Optional[str] = None,
+    in_place: bool = True,
+    output_dir: Optional[Path] = None,
+    max_workers: int = 4,
+    callback: Optional[Callable[[str, float, dict], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> dict:
+    """
+    Batch transcode all audio files in a folder to a target bitrate / format.
+    Frees disk space while preserving all tags and cover artwork.
+    """
+    if not folder.exists():
+        raise FileNotFoundError(f"Folder not found: {folder}")
+
+    audio_exts = {".mp3", ".m4a", ".flac", ".opus", ".wav", ".ogg"}
+    audio_files: List[Path] = [
+        f for f in folder.iterdir()
+        if f.is_file() and f.suffix.lower() in audio_exts and f.stat().st_size > 50000
+    ]
+
+    total_files = len(audio_files)
+    if total_files == 0:
+        return {
+            "total_files": 0,
+            "processed": 0,
+            "failed": 0,
+            "original_bytes": 0,
+            "new_bytes": 0,
+            "saved_bytes": 0,
+            "cancelled": False,
+        }
+
+    initial_total_bytes = sum(f.stat().st_size for f in audio_files)
+    processed_count = 0
+    failed_count = 0
+    progress_lock = threading.Lock()
+
+    def _notify(status: str, prog: float, stats: dict):
+        if callback:
+            try:
+                callback(status, prog, stats)
+            except Exception:
+                pass
+
+    _notify(f"Found {total_files} audio files. Starting downsizing...", 0.0, {
+        "processed": 0, "total": total_files, "saved_bytes": 0
+    })
+
+    def _transcode_worker(idx: int, file_path: Path):
+        nonlocal processed_count, failed_count
+        if cancel_check and cancel_check():
+            return False
+
+        with progress_lock:
+            done = processed_count + failed_count
+            _notify(f"[{done+1}/{total_files}] Downsizing: {file_path.name}", done / total_files, {
+                "processed": done, "total": total_files
+            })
+
+        out_ext = f".{target_fmt.lower().strip('.')}" if target_fmt else file_path.suffix.lower()
+        if in_place or output_dir is None:
+            dest_file = file_path.with_suffix(out_ext)
+        else:
+            dest_file = output_dir / f"{file_path.stem}{out_ext}"
+
+        ok = transcode_audio_file(
+            src_file=file_path,
+            dest_file=dest_file,
+            target_bitrate=target_bitrate,
+            target_fmt=target_fmt,
+        )
+
+        with progress_lock:
+            if ok:
+                processed_count += 1
+            else:
+                failed_count += 1
+            done = processed_count + failed_count
+            _notify(f"[{done}/{total_files}] Completed: {file_path.name}", done / total_files, {
+                "processed": done, "total": total_files
+            })
+        return ok
+
+    workers = max(1, min(max_workers, total_files))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {
+            executor.submit(_transcode_worker, idx, f): f
+            for idx, f in enumerate(audio_files)
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            if cancel_check and cancel_check():
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+
+    # Calculate final sizes
+    final_files = [
+        f for f in (output_dir if (output_dir and not in_place) else folder).iterdir()
+        if f.is_file() and f.suffix.lower() in audio_exts
+    ]
+    final_total_bytes = sum(f.stat().st_size for f in final_files)
+    saved_bytes = max(0, initial_total_bytes - final_total_bytes)
+
+    result = {
+        "total_files": total_files,
+        "processed": processed_count,
+        "failed": failed_count,
+        "original_bytes": initial_total_bytes,
+        "new_bytes": final_total_bytes,
+        "saved_bytes": saved_bytes,
+        "cancelled": bool(cancel_check and cancel_check()),
+    }
+
+    _notify("Downsizing complete!", 1.0, result)
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main Pipeline
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1053,12 +1308,42 @@ Examples:
         help="Number of concurrent/parallel song downloads (default: 4)",
     )
     parser.add_argument(
+        "--downsize",
+        metavar="FOLDER",
+        default=None,
+        help="Downsize / convert audio quality of all songs in a folder (e.g. --downsize ~/Music/Downloads --bitrate 192k)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version="spotify-dl 2.1.0",
     )
 
     args = parser.parse_args()
+
+    if args.downsize:
+        target_folder = Path(args.downsize).expanduser().resolve()
+        safe_print(f"\n{bold('=== Downsizing Audio in Folder ===')}")
+        safe_print(f"  Target Folder : {cyan(str(target_folder))}")
+        safe_print(f"  Target Bitrate: {bold(args.bitrate)}")
+        safe_print(f"  Parallelism   : {args.threads} workers\n")
+        res = batch_transcode_folder(
+            folder=target_folder,
+            target_bitrate=args.bitrate,
+            target_fmt=args.format if args.format != "mp3" else None,
+            in_place=True,
+            max_workers=args.threads,
+            callback=lambda msg, prog, stats: safe_print(f"  [*] {msg}") if "Completed:" in msg or "Downsizing complete!" in msg else None
+        )
+        saved_mb = res.get("saved_bytes", 0) / (1024 * 1024)
+        orig_mb = res.get("original_bytes", 0) / (1024 * 1024)
+        new_mb = res.get("new_bytes", 0) / (1024 * 1024)
+        safe_print(f"\n  {green('[OK] Downsizing Complete!')}")
+        safe_print(f"  Processed    : {res.get('processed', 0)} of {res.get('total_files', 0)} files")
+        safe_print(f"  Original Size: {orig_mb:.2f} MB")
+        safe_print(f"  New Size     : {new_mb:.2f} MB")
+        safe_print(f"  Storage Saved: {bold(f'{saved_mb:.2f} MB')}\n")
+        return
 
     if not args.url:
         interactive_prompt()

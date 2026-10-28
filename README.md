@@ -43,6 +43,7 @@ Prefer a portable single-file app without installing Python? Download from [**La
 - **Desktop Shortcut**: Double-click the **Spotify Downloader** icon on your Desktop to launch directly without opening a terminal.
 - **Unlimited Playlist Length**: Handles playlists with 100, 200, 500+ tracks automatically without capping or truncation.
 - **Smart Incremental Sync**: Use the same folder again and again. If your playlist has 150 songs and you add 5 new ones, it skips the 145 existing songs in seconds and downloads only the 5 new ones.
+- **Audio Downsizing & Storage Optimizer**: Downsize existing music files to 128k, 160k, or 192k to save massive storage space (up to 60% reduction) while preserving 100% of ID3 metadata and album art.
 - **Embedded High-Resolution Album Art**: Injects 640×640 album artwork directly into every audio file.
 - **Complete ID3 Tags**: Title, Lead Artist, Contributing/Featured Artists, Album, Track Number, Disc Number, and Release Date intact. Widely compatible with Windows Explorer, VLC, iTunes, Apple Music, and mobile players.
 - **Zero Configuration**: No Spotify API key, developer account, or login required.
@@ -73,6 +74,9 @@ python spotify_dl.py https://open.spotify.com/playlist/<id> -o "C:\Music\MyPlayl
 
 # Download a single track:
 python spotify_dl.py https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT -o "C:\Music"
+
+# Downsize all songs in a folder to save storage (e.g. 192k or 128k):
+python spotify_dl.py --downsize "C:\Music\MyPlaylist" --bitrate 192k
 ```
 
 ### CLI Options
@@ -82,6 +86,26 @@ python spotify_dl.py https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT -o "C
 | `-o`, `--output` | Destination folder for downloads | `~/Music/Spotify Downloads` |
 | `-t`, `--threads` | Number of parallel song downloads | `4` |
 | `--format` | Output audio format (`mp3`, `m4a`, `flac`, `opus`, `wav`) | `mp3` |
-| `--bitrate` | Audio bitrate (`128k`, `192k`, `256k`, `320k`) | `320k` |
+| `--bitrate` | Audio bitrate (`128k`, `160k`, `192k`, `256k`, `320k`) | `320k` |
 | `--force` | Re-download songs even if already present | `False` |
 | `--limit` | Limit download to first N tracks | `None` (all) |
+| `--downsize` | Downsize/transcode all songs in a folder to target bitrate | `None` |
+
+---
+
+## Downsizing and Audio Quality Adjustment
+
+If your music library occupies too much storage space (e.g. downloaded at 320 kbps), you can easily downsize your existing music files:
+
+1. **In the Desktop App**:
+   - In the **Download Folder** card, click **Downsize / Adjust Audio Quality in Folder...**.
+   - Choose your target bitrate (e.g. `192k` saves ~40% space, `128k` saves ~60% space).
+   - Select whether to replace files in-place or output to a separate subfolder.
+   - Click **Start Downsizing** — all album art, ID3 tags, and artist info are preserved intact.
+
+2. **In the Terminal (CLI)**:
+   ```powershell
+   python spotify_dl.py --downsize "C:\Users\mehul\Music\Spotify Downloads" --bitrate 192k
+   ```
+
+> **Note on Upgrading Audio Quality**: Re-encoding lower-bitrate audio files to higher bitrates cannot restore lost frequencies. To truly upgrade lower-bitrate tracks to pristine 320 kbps, check **Overwrite existing tracks (force re-download)** in the main window and click **Start Download** — Spotify Downloader will re-fetch the original 320k source streams directly from Spotify.
