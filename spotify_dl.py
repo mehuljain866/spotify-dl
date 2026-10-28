@@ -187,6 +187,11 @@ def fetch_playlist_tracks(playlist_url: str) -> Tuple[dict, List[dict]]:
     if content_type == "track":
         return _fetch_single_track(spotify_id)
     if content_type == "album":
+        if _SPOTAPI_AVAILABLE:
+            try:
+                return _fetch_album_spotapi(spotify_id)
+            except Exception as exc:
+                print(f"  {yellow('Note: Extended album scraper notice, trying fallback:')} {exc}")
         return _fetch_album_tracks(spotify_id)
 
     # 1. Primary method: spotapi with pagination (handles 100+ songs without API keys)
@@ -372,13 +377,27 @@ def _fetch_album_tracks(album_id: str) -> Tuple[dict, List[dict]]:
 
     album_name = entity.get("title") or entity.get("name", "Unknown Album")
     album_artists_raw = entity.get("artists") or []
-    album_artist = (
-        ", ".join(a.get("name", "") for a in album_artists_raw)
-        if album_artists_raw else "Unknown"
-    )
-    release_date = (entity.get("releaseDate") or {}).get("isoString", "")[:10]
-    cover_sources = (entity.get("coverArt") or {}).get("sources", [])
-    cover_url = cover_sources[-1]["url"] if cover_sources else None
+    if album_artists_raw:
+        album_artist = ", ".join(a.get("name", "") for a in album_artists_raw if a.get("name"))
+    else:
+        album_artist = entity.get("subtitle") or "Unknown"
+
+    rd_val = entity.get("releaseDate")
+    if isinstance(rd_val, dict):
+        release_date = rd_val.get("isoString", "")[:10]
+    elif isinstance(rd_val, str):
+        release_date = rd_val[:10]
+    else:
+        release_date = ""
+
+    cover_url = None
+    vi_images = entity.get("visualIdentity", {}).get("image", [])
+    if vi_images:
+        best_img = max(vi_images, key=lambda x: x.get("maxWidth", 0))
+        cover_url = best_img.get("url")
+    elif entity.get("coverArt", {}).get("sources"):
+        cover_url = entity["coverArt"]["sources"][-1]["url"]
+
     if cover_url and "00001e02" in cover_url:
         cover_url = cover_url.replace("00001e02", "0000b273")
 
@@ -389,9 +408,10 @@ def _fetch_album_tracks(album_id: str) -> Tuple[dict, List[dict]]:
             continue
         uri = t.get("uri", "")
         track_id = uri.split(":")[-1] if uri else ""
+        t_artist = t.get("subtitle") or album_artist
         tracks.append({
             "title": t.get("title", "Unknown"),
-            "artist": t.get("subtitle", album_artist),
+            "artist": t_artist,
             "album_artist": album_artist,
             "cover_url": cover_url,
             "track_number": idx,
@@ -399,6 +419,83 @@ def _fetch_album_tracks(album_id: str) -> Tuple[dict, List[dict]]:
             "album_name": album_name,
             "release_date": release_date,
             "duration_ms": t.get("duration", 0),
+            "track_id": track_id,
+            "playlist_pos": idx,
+        })
+
+    playlist_info = {
+        "name": album_name,
+        "description": f"By {album_artist}",
+        "cover_url": cover_url,
+    }
+    return playlist_info, tracks
+
+
+def _fetch_album_spotapi(album_id: str) -> Tuple[dict, List[dict]]:
+    """
+    Fetches all tracks for an album using spotapi's GraphQL endpoint.
+    Guarantees album_artist is set to the primary creator across all tracks.
+    """
+    a = spotapi.PublicAlbum(album_id)
+    info = a.get_album_info(limit=343)
+    alb = info.get("data", {}).get("albumUnion", {})
+    if not alb or alb.get("__typename") != "Album":
+        raise RuntimeError(f"Album not found or unavailable in this region (type: {alb.get('__typename') if alb else 'None'})")
+
+    album_name = alb.get("name", "Unknown Album")
+    album_artists = [
+        x["profile"]["name"]
+        for x in alb.get("artists", {}).get("items", [])
+        if "profile" in x and "name" in x["profile"]
+    ]
+    album_artist = ", ".join(album_artists) if album_artists else "Unknown"
+
+    rd_val = alb.get("date")
+    if isinstance(rd_val, dict):
+        release_date = rd_val.get("isoString", "")[:10]
+    elif isinstance(rd_val, str):
+        release_date = rd_val[:10]
+    else:
+        release_date = ""
+
+    cover_url = None
+    covers = alb.get("coverArt", {}).get("sources", [])
+    if covers:
+        best_cov = max(covers, key=lambda c: c.get("width") or 0)
+        cover_url = best_cov.get("url")
+        if cover_url and "00001e02" in cover_url:
+            cover_url = cover_url.replace("00001e02", "0000b273")
+
+    raw_items = alb.get("tracksV2", {}).get("items", [])
+    tracks: List[dict] = []
+    for idx, item in enumerate(raw_items, start=1):
+        tr = item.get("track", {})
+        if not tr or not tr.get("name"):
+            continue
+
+        tr_artists = [
+            x["profile"]["name"]
+            for x in tr.get("artists", {}).get("items", [])
+            if "profile" in x and "name" in x["profile"]
+        ]
+        track_artist = ", ".join(tr_artists) if tr_artists else album_artist
+
+        uri = tr.get("uri", "")
+        track_id = uri.split(":")[-1] if uri else ""
+        t_no = tr.get("trackNumber") or idx
+        disc_no = tr.get("discNumber") or 1
+        dur = tr.get("duration", {}).get("totalMilliseconds", 0) if isinstance(tr.get("duration"), dict) else tr.get("duration", 0)
+
+        tracks.append({
+            "title": tr.get("name", "Unknown"),
+            "artist": track_artist,
+            "album_artist": album_artist,
+            "album_name": album_name,
+            "release_date": release_date,
+            "cover_url": cover_url,
+            "track_number": t_no,
+            "disc_number": disc_no,
+            "duration_ms": dur,
             "track_id": track_id,
             "playlist_pos": idx,
         })
