@@ -6,6 +6,7 @@ Spotify songs/playlists with full metadata, album art, and progress tracking.
 """
 
 import os
+import queue
 import re
 import sys
 import threading
@@ -45,7 +46,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from spotify_dl import run_download, extract_spotify_id, batch_transcode_folder
+from spotify_dl import (
+    run_download,
+    extract_spotify_id,
+    batch_transcode_folder,
+    analyze_folder_audio,
+    get_reducible_bitrate_options,
+)
 
 
 class SpotifyDownloaderApp(ctk.CTk):
@@ -661,11 +668,35 @@ class DownsizeDialog(ctk.CTkToplevel):
 
         self.is_processing = False
         self._cancel_requested = False
+        self._closed = False
+        self._msg_queue = queue.Queue()
         self._work_thread: Optional[threading.Thread] = None
         self.selected_folder = Path(default_folder).expanduser().resolve()
 
         self._create_widgets()
+        self._poll_queue()
         self._scan_folder_stats()
+
+    def _poll_queue(self):
+        if self._closed:
+            return
+        try:
+            while not self._msg_queue.empty():
+                m_type, payload = self._msg_queue.get_nowait()
+                if m_type == "scan":
+                    stats, text, color = payload
+                    self._update_scan_ui(stats, text, color)
+                elif m_type == "progress":
+                    status, prog = payload
+                    self._update_progress(status, prog)
+                elif m_type == "complete":
+                    self._on_downsize_complete(payload)
+                elif m_type == "error":
+                    self._on_downsize_error(payload)
+        except Exception:
+            pass
+        if not self._closed:
+            self.after(50, self._poll_queue)
 
     def _create_widgets(self):
         container = ctk.CTkFrame(self, fg_color="transparent")
@@ -748,16 +779,10 @@ class DownsizeDialog(ctk.CTkToplevel):
         br_frame.pack(side="left", fill="x", expand=True, padx=(0, 10))
         br_label = ctk.CTkLabel(br_frame, text="Target Bitrate (Downsize to):", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray85")
         br_label.pack(anchor="w", pady=(0, 2))
-        self.bitrate_var = ctk.StringVar(value="192k (Standard / ~40% space saved)")
+        self.bitrate_var = ctk.StringVar(value="Analyzing folder...")
         self.bitrate_menu = ctk.CTkOptionMenu(
             br_frame,
-            values=[
-                "128k (Smallest / ~60% space saved)",
-                "160k (Compact)",
-                "192k (Standard / ~40% space saved)",
-                "256k (High Quality)",
-                "320k (Maximum Quality)",
-            ],
+            values=["Analyzing folder..."],
             variable=self.bitrate_var,
             height=32,
             fg_color="#2A2A2A",
@@ -765,6 +790,14 @@ class DownsizeDialog(ctk.CTkToplevel):
             button_hover_color="#444444",
         )
         self.bitrate_menu.pack(fill="x")
+        self.savings_hint_label = ctk.CTkLabel(
+            br_frame,
+            text="Analyzing audio files in folder...",
+            font=ctk.CTkFont(size=10),
+            text_color="gray60",
+            anchor="w",
+        )
+        self.savings_hint_label.pack(anchor="w", pady=(3, 0))
 
         # Speed / Workers
         speed_frame = ctk.CTkFrame(row1, fg_color="transparent")
@@ -929,28 +962,74 @@ class DownsizeDialog(ctk.CTkToplevel):
             self._scan_folder_stats()
 
     def _scan_folder_stats(self):
-        def _worker():
-            f_path = Path(self.folder_entry.get().strip()).expanduser().resolve()
-            if not f_path.exists():
-                self.after(0, lambda: self.folder_stats_label.configure(text="Folder does not exist", text_color="#E53935"))
-                return
-            audio_exts = {".mp3", ".m4a", ".flac", ".opus", ".wav", ".ogg"}
-            try:
-                files = [f for f in f_path.iterdir() if f.is_file() and f.suffix.lower() in audio_exts]
-                count = len(files)
-                total_mb = sum(f.stat().st_size for f in files) / (1024 * 1024)
-                if total_mb > 1024:
-                    size_str = f"{total_mb/1024:.2f} GB"
-                else:
-                    size_str = f"{total_mb:.1f} MB"
-                text = f"Found {count} audio files | Total Size: {size_str}"
-                color = "#81C784" if count > 0 else "gray60"
-            except Exception as e:
-                text = f"Error scanning folder: {e}"
-                color = "#E53935"
-            self.after(0, lambda t=text, c=color: self.folder_stats_label.configure(text=t, text_color=c))
+        self.folder_stats_label.configure(text="Analyzing folder & audio bitrates...", text_color="#81C784")
+        self.bitrate_menu.configure(values=["Scanning audio files..."])
+        self.bitrate_var.set("Scanning audio files...")
+        self.start_btn.configure(state="disabled")
 
-        threading.Thread(target=_worker, daemon=True).start()
+        folder_str = self.folder_entry.get().strip() if hasattr(self, "folder_entry") else str(self.selected_folder)
+        f_path = Path(folder_str).expanduser().resolve()
+
+        def _worker(target_path: Path):
+            if not target_path.exists():
+                self._msg_queue.put(("scan", (None, "Folder does not exist", "#E53935")))
+                return
+
+            stats = analyze_folder_audio(target_path)
+            count = stats["total_files"]
+            if count == 0:
+                self._msg_queue.put(("scan", (stats, "No audio files found in this folder", "gray60")))
+                return
+
+            total_mb = stats["total_bytes"] / (1024 * 1024)
+            size_str = f"{total_mb/1024:.2f} GB" if total_mb >= 1024 else f"{total_mb:.1f} MB"
+            max_br = stats["max_bitrate"]
+            min_br = stats["min_bitrate"]
+
+            if stats["is_lossless"]:
+                q_str = "Lossless (FLAC/WAV)"
+            elif max_br == min_br:
+                q_str = f"{max_br} kbps"
+            else:
+                q_str = f"{min_br}k - {max_br}k"
+
+            text = f"Found {count} songs ({size_str}) | Current Quality: {q_str}"
+            self._msg_queue.put(("scan", (stats, text, "#81C784")))
+
+        threading.Thread(target=_worker, args=(f_path,), daemon=True).start()
+
+    def _update_scan_ui(self, stats: Optional[dict], text: str, color: str):
+        self.folder_stats_label.configure(text=text, text_color=color)
+        if not stats or stats.get("total_files", 0) == 0:
+            self.bitrate_menu.configure(values=["No audio files found"])
+            self.bitrate_var.set("No audio files found")
+            self.savings_hint_label.configure(text="Select a folder containing MP3, M4A, or FLAC songs.", text_color="gray60")
+            self.start_btn.configure(state="disabled")
+            return
+
+        total_mb = stats["total_bytes"] / (1024 * 1024)
+        max_br = stats["max_bitrate"]
+        reducible_options = get_reducible_bitrate_options(max_br, total_mb)
+
+        if not reducible_options:
+            # Files already at lowest bitrate
+            no_opt_msg = f"Already at minimum quality ({max_br} kbps)"
+            self.bitrate_menu.configure(values=[no_opt_msg])
+            self.bitrate_var.set(no_opt_msg)
+            self.savings_hint_label.configure(text="All songs in this folder are already at minimum bitrate. No downsizing needed.", text_color="#E53935")
+            self.start_btn.configure(state="disabled")
+            self._append_log(f"Notice: All songs are already at or below {max_br} kbps. Further downsizing is not applicable.")
+            return
+
+        # Valid reducible options found
+        labels = [opt[1] for opt in reducible_options]
+        self.bitrate_menu.configure(values=labels)
+        self.bitrate_var.set(labels[0])
+        self.savings_hint_label.configure(
+            text="Smart Filter: Showing only bitrates lower than your current songs to guarantee space savings.",
+            text_color="#81C784"
+        )
+        self.start_btn.configure(state="normal")
 
     def _append_log(self, text: str):
         self.log_box.configure(state="normal")
@@ -973,7 +1052,13 @@ class DownsizeDialog(ctk.CTkToplevel):
         # Bitrate
         raw_br = self.bitrate_var.get()
         m = re.search(r"\d+k", raw_br)
-        target_bitrate = m.group() if m else "192k"
+        if not m:
+            messagebox.showwarning(
+                "No Reducible Bitrate",
+                "Please select a valid reducible target bitrate from the dropdown."
+            )
+            return
+        target_bitrate = m.group()
 
         # Format
         fmt_choice = self.fmt_var.get().lower()
@@ -1015,7 +1100,7 @@ class DownsizeDialog(ctk.CTkToplevel):
 
     def _run_downsize_worker(self, f_path: Path, target_bitrate: str, target_fmt: Optional[str], in_place: bool, output_dir: Optional[Path], workers: int):
         def _cb(status: str, prog: float, stats: dict):
-            self.after(0, lambda s=status, p=prog: self._update_progress(s, p))
+            self._msg_queue.put(("progress", (status, prog)))
 
         def _cancel() -> bool:
             return self._cancel_requested
@@ -1031,9 +1116,9 @@ class DownsizeDialog(ctk.CTkToplevel):
                 callback=_cb,
                 cancel_check=_cancel,
             )
-            self.after(0, lambda r=res: self._on_downsize_complete(r))
+            self._msg_queue.put(("complete", res))
         except Exception as e:
-            self.after(0, lambda err=str(e): self._on_downsize_error(err))
+            self._msg_queue.put(("error", str(e)))
 
     def _update_progress(self, status: str, prog: float):
         try:
@@ -1042,7 +1127,7 @@ class DownsizeDialog(ctk.CTkToplevel):
                 self.progress_bar.set(min(1.0, max(0.0, prog)))
                 pct = int(min(1.0, max(0.0, prog)) * 100)
                 self.percent_label.configure(text=f"{pct}%")
-            if "Completed:" in status:
+            if "Completed:" in status or "Skipped:" in status:
                 self._append_log(status)
         except Exception:
             pass
@@ -1062,6 +1147,8 @@ class DownsizeDialog(ctk.CTkToplevel):
             self._append_log("Operation was cancelled.")
             return
 
+        processed = res.get("processed", 0)
+        skipped = res.get("skipped", 0)
         saved_mb = res.get("saved_bytes", 0) / (1024 * 1024)
         orig_mb = res.get("original_bytes", 0) / (1024 * 1024)
         new_mb = res.get("new_bytes", 0) / (1024 * 1024)
@@ -1076,7 +1163,11 @@ class DownsizeDialog(ctk.CTkToplevel):
         else:
             saved_str = f"{saved_mb:.1f} MB"
 
-        msg = f"Done! Downsized {res.get('processed', 0)} files.\nSize: {size_summary}\nStorage Saved: {saved_str}!"
+        msg = f"Done! Downsized {processed} files"
+        if skipped > 0:
+            msg += f", skipped {skipped} (already <= target quality)"
+        msg += f".\nSize: {size_summary}\nStorage Saved: {saved_str}!"
+
         self.status_label.configure(text=f"Done! Storage saved: {saved_str}")
         self.progress_bar.set(1.0)
         self.percent_label.configure(text="100%")
@@ -1103,8 +1194,10 @@ class DownsizeDialog(ctk.CTkToplevel):
         if self.is_processing:
             if messagebox.askyesno("Confirm Stop", "Downsizing is in progress. Stop and close?"):
                 self._cancel_requested = True
+                self._closed = True
                 self.destroy()
         else:
+            self._closed = True
             self.destroy()
 
 

@@ -877,6 +877,120 @@ def transcode_audio_file(
         return False
 
 
+def get_audio_file_bitrate(file_path: Path) -> Optional[int]:
+    """
+    Returns the bitrate of an audio file in kbps (e.g. 128, 192, 256, 320).
+    For lossless audio (FLAC, WAV), returns 1000 to indicate high/lossless quality.
+    """
+    ext = file_path.suffix.lower()
+    if ext in (".flac", ".wav"):
+        return 1000
+    try:
+        import mutagen
+        audio = mutagen.File(file_path)
+        if audio and hasattr(audio, "info") and hasattr(audio.info, "bitrate") and audio.info.bitrate:
+            return round(audio.info.bitrate / 1000)
+    except Exception:
+        pass
+    return None
+
+
+def analyze_folder_audio(folder: Path) -> dict:
+    """
+    Scans a folder and determines total audio files, total size,
+    and current detected audio bitrates.
+    """
+    if not folder.exists():
+        return {
+            "total_files": 0,
+            "total_bytes": 0,
+            "max_bitrate": 0,
+            "min_bitrate": 0,
+            "avg_bitrate": 0,
+            "is_lossless": False,
+        }
+
+    audio_exts = {".mp3", ".m4a", ".flac", ".opus", ".wav", ".ogg"}
+    try:
+        files = [
+            f for f in folder.iterdir()
+            if f.is_file() and f.suffix.lower() in audio_exts and f.stat().st_size > 50000
+        ]
+    except Exception:
+        files = []
+
+    if not files:
+        return {
+            "total_files": 0,
+            "total_bytes": 0,
+            "max_bitrate": 0,
+            "min_bitrate": 0,
+            "avg_bitrate": 0,
+            "is_lossless": False,
+        }
+
+    total_bytes = sum(f.stat().st_size for f in files)
+    bitrates = []
+    has_lossless = False
+
+    for f in files:
+        br = get_audio_file_bitrate(f)
+        if br == 1000:
+            has_lossless = True
+            bitrates.append(320)
+        elif br:
+            bitrates.append(br)
+
+    max_br = max(bitrates) if bitrates else 256
+    min_br = min(bitrates) if bitrates else 256
+    avg_br = round(sum(bitrates) / len(bitrates)) if bitrates else 256
+
+    return {
+        "total_files": len(files),
+        "total_bytes": total_bytes,
+        "max_bitrate": max_br,
+        "min_bitrate": min_br,
+        "avg_bitrate": avg_br,
+        "is_lossless": has_lossless,
+    }
+
+
+def get_reducible_bitrate_options(current_max_kbps: int, total_mb: float = 0.0) -> List[Tuple[str, str, int]]:
+    """
+    Returns only tiers that are strictly lower than the current bitrate.
+    Calculates the actual estimated percentage and MB reduction.
+    Format: (raw_bitrate_str, formatted_label, tier_kbps)
+    """
+    standard_tiers = [
+        (320, "320k", "Maximum Quality"),
+        (256, "256k", "High Quality"),
+        (192, "192k", "Standard"),
+        (160, "160k", "Compact"),
+        (128, "128k", "Smallest"),
+        (96,  "96k",  "Ultra-light"),
+    ]
+
+    baseline = max(current_max_kbps, 128)
+    results = []
+
+    for tier_kbps, tier_str, tier_name in standard_tiers:
+        # Only include tiers that are strictly lower than current max
+        if tier_kbps < current_max_kbps:
+            pct_saved = round((1.0 - (tier_kbps / baseline)) * 100)
+            if total_mb > 0:
+                mb_saved = total_mb * (pct_saved / 100.0)
+                if mb_saved >= 1024:
+                    saved_str = f"~{mb_saved / 1024:.2f} GB"
+                else:
+                    saved_str = f"~{mb_saved:.0f} MB"
+                label = f"{tier_str} ({tier_name} / Save ~{pct_saved}% [{saved_str}])"
+            else:
+                label = f"{tier_str} ({tier_name} / Save ~{pct_saved}%)"
+            results.append((tier_str, label, tier_kbps))
+
+    return results
+
+
 def batch_transcode_folder(
     folder: Path,
     target_bitrate: str = "192k",
@@ -890,6 +1004,7 @@ def batch_transcode_folder(
     """
     Batch transcode all audio files in a folder to a target bitrate / format.
     Frees disk space while preserving all tags and cover artwork.
+    Automatically skips files that are already at or below target bitrate.
     """
     if not folder.exists():
         raise FileNotFoundError(f"Folder not found: {folder}")
@@ -905,6 +1020,7 @@ def batch_transcode_folder(
         return {
             "total_files": 0,
             "processed": 0,
+            "skipped": 0,
             "failed": 0,
             "original_bytes": 0,
             "new_bytes": 0,
@@ -914,8 +1030,12 @@ def batch_transcode_folder(
 
     initial_total_bytes = sum(f.stat().st_size for f in audio_files)
     processed_count = 0
+    skipped_count = 0
     failed_count = 0
     progress_lock = threading.Lock()
+
+    m_target = re.search(r"\d+", target_bitrate)
+    target_kbps = int(m_target.group()) if m_target else 192
 
     def _notify(status: str, prog: float, stats: dict):
         if callback:
@@ -924,19 +1044,31 @@ def batch_transcode_folder(
             except Exception:
                 pass
 
-    _notify(f"Found {total_files} audio files. Starting downsizing...", 0.0, {
-        "processed": 0, "total": total_files, "saved_bytes": 0
+    _notify(f"Found {total_files} audio files. Starting smart downsizing...", 0.0, {
+        "processed": 0, "skipped": 0, "failed": 0, "total": total_files, "saved_bytes": 0
     })
 
     def _transcode_worker(idx: int, file_path: Path):
-        nonlocal processed_count, failed_count
+        nonlocal processed_count, skipped_count, failed_count
         if cancel_check and cancel_check():
             return False
 
+        # Smart check: if file is already at or below target bitrate (and format matches), skip it
+        file_br = get_audio_file_bitrate(file_path)
+        format_match = (target_fmt is None or target_fmt.lower().strip(".") == file_path.suffix.lower().strip("."))
+        if file_br is not None and file_br <= target_kbps and format_match:
+            with progress_lock:
+                skipped_count += 1
+                done = processed_count + skipped_count + failed_count
+                _notify(f"[{done}/{total_files}] Skipped: {file_path.name} (already {file_br}k <= {target_bitrate})", done / total_files, {
+                    "processed": processed_count, "skipped": skipped_count, "failed": failed_count, "total": total_files
+                })
+            return True
+
         with progress_lock:
-            done = processed_count + failed_count
+            done = processed_count + skipped_count + failed_count
             _notify(f"[{done+1}/{total_files}] Downsizing: {file_path.name}", done / total_files, {
-                "processed": done, "total": total_files
+                "processed": processed_count, "skipped": skipped_count, "failed": failed_count, "total": total_files
             })
 
         out_ext = f".{target_fmt.lower().strip('.')}" if target_fmt else file_path.suffix.lower()
@@ -957,9 +1089,9 @@ def batch_transcode_folder(
                 processed_count += 1
             else:
                 failed_count += 1
-            done = processed_count + failed_count
+            done = processed_count + skipped_count + failed_count
             _notify(f"[{done}/{total_files}] Completed: {file_path.name}", done / total_files, {
-                "processed": done, "total": total_files
+                "processed": processed_count, "skipped": skipped_count, "failed": failed_count, "total": total_files
             })
         return ok
 
@@ -985,6 +1117,7 @@ def batch_transcode_folder(
     result = {
         "total_files": total_files,
         "processed": processed_count,
+        "skipped": skipped_count,
         "failed": failed_count,
         "original_bytes": initial_total_bytes,
         "new_bytes": final_total_bytes,
