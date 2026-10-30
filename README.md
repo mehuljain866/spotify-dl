@@ -115,6 +115,10 @@ python spotify_dl.py --update-explicit "C:\Music\MyPlaylist" --explicit-mode cle
 
 Spotify Downloader gives you full control over whether to download uncensored explicit tracks or radio edits, and automatically embeds synchronized lyrics into your files for Apple Music and iOS.
 
+<p align="center">
+  <img src="assets/screenshot-explicit.png" alt="Explicit and Clean Audio / Lyrics Manager" width="550" />
+</p>
+
 ### Downloading Explicit or Clean Songs
 
 1. **In the Desktop App**:
