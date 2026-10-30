@@ -53,6 +53,7 @@ from spotify_dl import (
     analyze_folder_audio,
     get_reducible_bitrate_options,
     fix_library_album_tags,
+    batch_update_library_explicit_lyrics,
 )
 
 
@@ -65,8 +66,8 @@ class SpotifyDownloaderApp(ctk.CTk):
         ctk.set_default_color_theme("green")
 
         self.title("Spotify Downloader")
-        self.geometry("660x650")
-        self.minsize(620, 580)
+        self.geometry("660x700")
+        self.minsize(620, 620)
 
         # Set window icon if available
         icon_path = SCRIPT_DIR / "icon.ico"
@@ -97,6 +98,8 @@ class SpotifyDownloaderApp(ctk.CTk):
             "threads": "4 Songs at once (Fast)",
             "limit": "",
             "force": False,
+            "explicit_mode": "Explicit (Uncensored)",
+            "embed_lyrics": True,
         }
         if self.config_file.exists():
             try:
@@ -118,6 +121,8 @@ class SpotifyDownloaderApp(ctk.CTk):
             th_val = self.threads_var.get() if hasattr(self, "threads_var") else "4 Songs at once (Fast)"
             lim_val = self.limit_entry.get().strip() if hasattr(self, "limit_entry") else ""
             force_val = self.force_var.get() if hasattr(self, "force_var") else False
+            explicit_val = self.explicit_mode_var.get() if hasattr(self, "explicit_mode_var") else "Explicit (Uncensored)"
+            lyrics_val = self.embed_lyrics_var.get() if hasattr(self, "embed_lyrics_var") else True
 
             cfg = {
                 "output_dir": folder_val or str(Path.home() / "Music" / "Spotify Downloads"),
@@ -126,6 +131,8 @@ class SpotifyDownloaderApp(ctk.CTk):
                 "threads": th_val,
                 "limit": lim_val,
                 "force": force_val,
+                "explicit_mode": explicit_val,
+                "embed_lyrics": lyrics_val,
             }
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=2)
@@ -248,7 +255,7 @@ class SpotifyDownloaderApp(ctk.CTk):
         )
         open_folder_btn.pack(side="left")
 
-        # Tool button for downsizing / converting quality of songs in folder
+        # Tool buttons for folder maintenance
         folder_tools_row = ctk.CTkFrame(folder_inner, fg_color="transparent")
         folder_tools_row.pack(fill="x", pady=(8, 0))
 
@@ -266,7 +273,7 @@ class SpotifyDownloaderApp(ctk.CTk):
 
         fix_tags_btn = ctk.CTkButton(
             folder_tools_row,
-            text="Fix Split Albums (Apple Music)...",
+            text="Fix Split Albums...",
             font=ctk.CTkFont(size=11, weight="bold"),
             height=32,
             fg_color="#2D2338",
@@ -274,7 +281,19 @@ class SpotifyDownloaderApp(ctk.CTk):
             text_color="#CE93D8",
             command=self._open_fix_tags_dialog,
         )
-        fix_tags_btn.pack(side="left", fill="x", expand=True)
+        fix_tags_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        explicit_tool_btn = ctk.CTkButton(
+            folder_tools_row,
+            text="Explicit & Lyrics...",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            height=32,
+            fg_color="#3A2A1A",
+            hover_color="#553C24",
+            text_color="#FFB74D",
+            command=self._open_explicit_dialog,
+        )
+        explicit_tool_btn.pack(side="left", fill="x", expand=True)
 
         # ── Download Settings Card ───────────────────────────────────────────
         settings_frame = ctk.CTkFrame(main_frame, fg_color="#1E1E1E", corner_radius=10)
@@ -352,7 +371,7 @@ class SpotifyDownloaderApp(ctk.CTk):
 
         # Row 2: Limit & Overwrite checkbox
         row2 = ctk.CTkFrame(settings_inner, fg_color="transparent")
-        row2.pack(fill="x")
+        row2.pack(fill="x", pady=(0, 10))
 
         limit_frame = ctk.CTkFrame(row2, fg_color="transparent")
         limit_frame.pack(side="left", padx=(0, 24))
@@ -382,6 +401,42 @@ class SpotifyDownloaderApp(ctk.CTk):
             height=32,
         )
         self.force_checkbox.pack(side="left")
+
+        # Row 3: Lyrics & Explicit Audio Version
+        row3 = ctk.CTkFrame(settings_inner, fg_color="transparent")
+        row3.pack(fill="x")
+
+        ver_frame = ctk.CTkFrame(row3, fg_color="transparent")
+        ver_frame.pack(side="left", padx=(0, 24))
+        ver_label = ctk.CTkLabel(ver_frame, text="Audio Version:", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray85")
+        ver_label.pack(side="left", padx=(0, 8))
+        self.explicit_mode_var = ctk.StringVar(value=self.saved_config.get("explicit_mode", "Explicit (Uncensored)"))
+        self.explicit_menu = ctk.CTkOptionMenu(
+            ver_frame,
+            values=["Explicit (Uncensored)", "Clean (Radio Edit)"],
+            variable=self.explicit_mode_var,
+            width=175,
+            height=32,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.explicit_menu.pack(side="left")
+
+        lyr_frame = ctk.CTkFrame(row3, fg_color="transparent")
+        lyr_frame.pack(side="left", fill="x", expand=True)
+        self.embed_lyrics_var = ctk.BooleanVar(value=self.saved_config.get("embed_lyrics", True))
+        self.embed_lyrics_checkbox = ctk.CTkCheckBox(
+            lyr_frame,
+            text="Embed lyrics into songs (Apple Music / iOS)",
+            variable=self.embed_lyrics_var,
+            font=ctk.CTkFont(size=12),
+            checkmark_color="#000000",
+            fg_color="#1DB954",
+            hover_color="#1AA34A",
+            height=32,
+        )
+        self.embed_lyrics_checkbox.pack(anchor="w")
 
         # ── Download Action Button ───────────────────────────────────────────
         self.start_btn = ctk.CTkButton(
@@ -480,6 +535,12 @@ class SpotifyDownloaderApp(ctk.CTk):
         dialog = FixAlbumTagsDialog(self, f_path)
         dialog.focus()
 
+    def _open_explicit_dialog(self):
+        folder_str = self.folder_entry.get().strip()
+        f_path = Path(folder_str) if folder_str else self.output_dir
+        dialog = ExplicitLyricsDialog(self, f_path)
+        dialog.focus()
+
     def _append_log(self, text: str):
         self.log_textbox.configure(state="normal")
         self.log_textbox.insert("end", f"{text}\n")
@@ -537,6 +598,9 @@ class SpotifyDownloaderApp(ctk.CTk):
         fmt = self.format_var.get().strip().lower() or "mp3"
         bitrate = self.bitrate_var.get().strip() or "320k"
         force_redownload = self.force_var.get()
+        exp_choice = self.explicit_mode_var.get().strip()
+        explicit_mode = "clean" if "clean" in exp_choice.lower() else "explicit"
+        embed_lyrics = self.embed_lyrics_var.get()
 
         # Determine max parallel workers from dropdown
         speed_text = self.threads_var.get()
@@ -560,7 +624,9 @@ class SpotifyDownloaderApp(ctk.CTk):
 
         self._append_log("─" * 45)
         self._append_log(f"Starting download to: {output_path}")
-        settings_summary = f"Format: {fmt.upper()} @ {bitrate} | Speed: {max_workers} songs at once"
+        settings_summary = f"Format: {fmt.upper()} @ {bitrate} | Speed: {max_workers} songs at once | Version: {exp_choice}"
+        if embed_lyrics:
+            settings_summary += " | Lyrics: Embedded"
         if limit_val:
             settings_summary += f" | Limit: first {limit_val} tracks"
         if force_redownload:
@@ -569,7 +635,7 @@ class SpotifyDownloaderApp(ctk.CTk):
 
         self._download_thread = threading.Thread(
             target=self._run_download_worker,
-            args=(url, output_path, max_workers, fmt, bitrate, limit_val, force_redownload),
+            args=(url, output_path, max_workers, fmt, bitrate, limit_val, force_redownload, explicit_mode, embed_lyrics),
             daemon=True,
         )
         self._download_thread.start()
@@ -583,6 +649,8 @@ class SpotifyDownloaderApp(ctk.CTk):
         bitrate: str = "320k",
         limit: Optional[int] = None,
         force_redownload: bool = False,
+        explicit_mode: str = "explicit",
+        embed_lyrics: bool = True,
     ):
         def progress_callback(status: str, prog: float, current_track: str = None):
             self.after(0, lambda s=status, p=prog, c=current_track: self._update_progress(s, p, c))
@@ -601,6 +669,8 @@ class SpotifyDownloaderApp(ctk.CTk):
                 max_workers=max_workers,
                 callback=progress_callback,
                 cancel_check=cancel_check,
+                explicit_mode=explicit_mode,
+                embed_lyrics=embed_lyrics,
             )
             self.after(0, lambda r=result: self._on_download_complete(r))
         except Exception as e:
@@ -1415,6 +1485,355 @@ class FixAlbumTagsDialog(ctk.CTkToplevel):
 
     def _close(self):
         self._closed = True
+        self.destroy()
+
+
+class ExplicitLyricsDialog(ctk.CTkToplevel):
+    """
+    Dialog to manage Explicit vs Clean audio and lyrics across an entire music folder.
+    - Switch songs between uncensored Explicit and Clean (Radio Edit) versions.
+    - Re-downloads the matching YouTube audio stream when switching versions.
+    - Fetches & embeds lyrics into ID3 tags (USLT for MP3 / ©lyr for M4A) for Apple Music & iOS.
+    - Updates Apple Music / iTunes Advisory badges ([E] for Explicit, [Clean] for Clean).
+    """
+    def __init__(self, parent: ctk.CTk, default_folder: Path):
+        super().__init__(parent)
+
+        self.title("Explicit & Clean Audio / Lyrics Manager")
+        self.geometry("680x640")
+        self.minsize(620, 560)
+        self.transient(parent)
+
+        icon_path = SCRIPT_DIR / "icon.ico"
+        if icon_path.exists():
+            try:
+                self.iconbitmap(str(icon_path))
+            except Exception:
+                pass
+
+        self.is_processing = False
+        self._cancel_requested = False
+        self._closed = False
+        self._msg_queue = queue.Queue()
+        self.selected_folder = Path(default_folder).expanduser().resolve()
+
+        self._create_widgets()
+        self._poll_queue()
+        self._scan_folder_info()
+
+    def _poll_queue(self):
+        if self._closed:
+            return
+        try:
+            while not self._msg_queue.empty():
+                m_type, payload = self._msg_queue.get_nowait()
+                if m_type == "status":
+                    status, prog = payload
+                    self.status_label.configure(text=status)
+                    if prog >= 0:
+                        self.progress_bar.set(prog)
+                        self.pct_label.configure(text=f"{int(prog * 100)}%")
+                elif m_type == "log":
+                    self._append_log(payload)
+                elif m_type == "folder_info":
+                    count_text = payload
+                    self.folder_info_label.configure(text=count_text)
+                elif m_type == "complete":
+                    res = payload
+                    self.is_processing = False
+                    self.start_btn.configure(
+                        state="normal",
+                        text="Start Updating Library",
+                        fg_color="#E65100",
+                        hover_color="#F57C00",
+                    )
+                    self.progress_bar.set(1.0)
+                    self.pct_label.configure(text="100%")
+                    if res.get("cancelled"):
+                        self.status_label.configure(
+                            text="Process cancelled.",
+                            text_color="#FFA726",
+                        )
+                        self._append_log("Update cancelled by user.")
+                    else:
+                        summary = f"Complete! {res.get('swapped_audio', 0)} audio swapped, {res.get('tags_updated', 0)} tags/lyrics updated."
+                        self.status_label.configure(
+                            text=summary,
+                            text_color="#81C784",
+                        )
+                        self._append_log(f"\n{summary}")
+                        messagebox.showinfo("Library Update Finished", summary)
+                elif m_type == "error":
+                    self.is_processing = False
+                    self.start_btn.configure(
+                        state="normal",
+                        text="Start Updating Library",
+                        fg_color="#E65100",
+                        hover_color="#F57C00",
+                    )
+                    self.status_label.configure(text=f"Error: {payload}", text_color="#E53935")
+                    self._append_log(f"Error: {payload}")
+                    messagebox.showerror("Error", str(payload))
+        except Exception:
+            pass
+        if not self._closed:
+            self.after(50, self._poll_queue)
+
+    def _create_widgets(self):
+        container = ctk.CTkFrame(self, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=20, pady=16)
+
+        # Header
+        title = ctk.CTkLabel(
+            container,
+            text="Explicit & Clean Audio / Lyrics Manager",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color="#FFB74D",
+            anchor="w",
+        )
+        title.pack(fill="x", pady=(0, 2))
+
+        subtitle = ctk.CTkLabel(
+            container,
+            text="Switch songs between Explicit & Clean Radio Edit versions and embed synchronized lyrics for Apple Music & iOS.",
+            font=ctk.CTkFont(size=11),
+            text_color="gray70",
+            justify="left",
+            anchor="w",
+        )
+        subtitle.pack(fill="x", pady=(0, 12))
+
+        # Folder card
+        folder_card = ctk.CTkFrame(container, fg_color="#1E1E1E", corner_radius=10)
+        folder_card.pack(fill="x", pady=(0, 12))
+        f_inner = ctk.CTkFrame(folder_card, fg_color="transparent")
+        f_inner.pack(fill="x", padx=14, pady=12)
+
+        ctk.CTkLabel(f_inner, text="Music Folder:", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray85").pack(anchor="w", pady=(0, 4))
+        row = ctk.CTkFrame(f_inner, fg_color="transparent")
+        row.pack(fill="x")
+        self.folder_entry = ctk.CTkEntry(row, height=32, font=ctk.CTkFont(size=12))
+        self.folder_entry.insert(0, str(self.selected_folder))
+        self.folder_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        browse_btn = ctk.CTkButton(row, text="Browse...", width=80, height=32, command=self._browse_folder)
+        browse_btn.pack(side="left")
+
+        self.folder_info_label = ctk.CTkLabel(
+            f_inner,
+            text="Scanning folder...",
+            font=ctk.CTkFont(size=11),
+            text_color="#81C784",
+            anchor="w",
+        )
+        self.folder_info_label.pack(fill="x", pady=(6, 0))
+
+        # Settings Card
+        settings_card = ctk.CTkFrame(container, fg_color="#1E1E1E", corner_radius=10)
+        settings_card.pack(fill="x", pady=(0, 12))
+        s_inner = ctk.CTkFrame(settings_card, fg_color="transparent")
+        s_inner.pack(fill="x", padx=14, pady=12)
+
+        ctk.CTkLabel(s_inner, text="Target Settings:", font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w", pady=(0, 8))
+
+        # Option row
+        opt_row = ctk.CTkFrame(s_inner, fg_color="transparent")
+        opt_row.pack(fill="x", pady=(0, 8))
+
+        mode_frame = ctk.CTkFrame(opt_row, fg_color="transparent")
+        mode_frame.pack(side="left", padx=(0, 16))
+        ctk.CTkLabel(mode_frame, text="Target Version:", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray85").pack(anchor="w", pady=(0, 3))
+        self.target_mode_var = ctk.StringVar(value="Explicit (Uncensored)")
+        self.target_mode_menu = ctk.CTkOptionMenu(
+            mode_frame,
+            values=["Explicit (Uncensored)", "Clean (Radio Edit)"],
+            variable=self.target_mode_var,
+            width=190,
+            height=32,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.target_mode_menu.pack(side="left")
+
+        speed_frame = ctk.CTkFrame(opt_row, fg_color="transparent")
+        speed_frame.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(speed_frame, text="Processing Speed:", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray85").pack(anchor="w", pady=(0, 3))
+        self.speed_var = ctk.StringVar(value="4 Songs at once (Fast)")
+        self.speed_menu = ctk.CTkOptionMenu(
+            speed_frame,
+            values=["1 Song at a time", "3 Songs at once", "4 Songs at once (Fast)", "6 Songs at once (Turbo)"],
+            variable=self.speed_var,
+            width=190,
+            height=32,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.speed_menu.pack(anchor="w")
+
+        # Checkbox 1: Re-download swapped audio
+        self.swap_audio_var = ctk.BooleanVar(value=True)
+        self.swap_audio_cb = ctk.CTkCheckBox(
+            s_inner,
+            text="Re-download audio when version differs (e.g. Explicit ↔ Clean Radio Edit)",
+            variable=self.swap_audio_var,
+            font=ctk.CTkFont(size=12),
+            checkmark_color="#000000",
+            fg_color="#FF9800",
+            hover_color="#F57C00",
+            height=28,
+        )
+        self.swap_audio_cb.pack(anchor="w", pady=(0, 4))
+
+        # Checkbox 2: Embed lyrics
+        self.embed_lyrics_var = ctk.BooleanVar(value=True)
+        self.embed_lyrics_cb = ctk.CTkCheckBox(
+            s_inner,
+            text="Fetch & embed lyrics into song tags (USLT / Apple Music) and save .lrc",
+            variable=self.embed_lyrics_var,
+            font=ctk.CTkFont(size=12),
+            checkmark_color="#000000",
+            fg_color="#FF9800",
+            hover_color="#F57C00",
+            height=28,
+        )
+        self.embed_lyrics_cb.pack(anchor="w")
+
+        # Action Buttons
+        btn_row = ctk.CTkFrame(container, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(0, 10))
+
+        self.start_btn = ctk.CTkButton(
+            btn_row,
+            text="Start Updating Library",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=36,
+            fg_color="#E65100",
+            hover_color="#F57C00",
+            text_color="#FFFFFF",
+            command=self._on_start_click,
+        )
+        self.start_btn.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        close_btn = ctk.CTkButton(
+            btn_row,
+            text="Close",
+            width=90,
+            height=36,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=self._close,
+        )
+        close_btn.pack(side="left")
+
+        # Progress row
+        p_row = ctk.CTkFrame(container, fg_color="transparent")
+        p_row.pack(fill="x", pady=(0, 4))
+        self.status_label = ctk.CTkLabel(p_row, text="Ready to update library.", font=ctk.CTkFont(size=11), text_color="gray80", anchor="w")
+        self.status_label.pack(side="left", fill="x", expand=True)
+        self.pct_label = ctk.CTkLabel(p_row, text="0%", font=ctk.CTkFont(size=11), text_color="gray60")
+        self.pct_label.pack(side="right")
+
+        self.progress_bar = ctk.CTkProgressBar(container, height=6)
+        self.progress_bar.set(0.0)
+        self.progress_bar.pack(fill="x", pady=(0, 10))
+
+        # Log box
+        self.log_box = ctk.CTkTextbox(container, height=150, font=ctk.CTkFont(family="Consolas", size=10), fg_color="#141414")
+        self.log_box.pack(fill="both", expand=True)
+        self.log_box.insert("end", "Choose your target mode (Explicit or Clean) and click 'Start Updating Library'.\nCover art and tags are preserved when swapping audio streams.\n")
+        self.log_box.configure(state="disabled")
+
+    def _scan_folder_info(self):
+        def _worker():
+            f_path = self.selected_folder
+            if not f_path.exists():
+                self._msg_queue.put(("folder_info", "Folder does not exist"))
+                return
+            audio_files = [f for f in f_path.iterdir() if f.is_file() and f.suffix.lower() in (".mp3", ".m4a", ".flac")]
+            total_size_mb = sum(f.stat().st_size for f in audio_files) / (1024 * 1024)
+            self._msg_queue.put(("folder_info", f"Found {len(audio_files)} songs ({total_size_mb:.1f} MB) in folder"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _browse_folder(self):
+        f = ctk.filedialog.askdirectory(title="Select Music Folder", initialdir=str(self.selected_folder))
+        if f:
+            self.selected_folder = Path(f).resolve()
+            self.folder_entry.delete(0, "end")
+            self.folder_entry.insert(0, str(self.selected_folder))
+            self._scan_folder_info()
+
+    def _append_log(self, text: str):
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", f"{text}\n")
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+
+    def _on_start_click(self):
+        if self.is_processing:
+            self._cancel_requested = True
+            self.status_label.configure(text="Cancelling...", text_color="#FFA726")
+            self.start_btn.configure(state="disabled", text="Stopping...")
+            return
+
+        f_path = Path(self.folder_entry.get().strip()).expanduser().resolve()
+        if not f_path.exists():
+            messagebox.showerror("Error", "The specified folder does not exist.")
+            return
+
+        target_mode = "clean" if "clean" in self.target_mode_var.get().lower() else "explicit"
+        redownload_swapped = self.swap_audio_var.get()
+        embed_lyrics = self.embed_lyrics_var.get()
+
+        speed_text = self.speed_var.get()
+        m = re.search(r"\d+", speed_text)
+        max_workers = int(m.group()) if m else 4
+
+        self.is_processing = True
+        self._cancel_requested = False
+        self.start_btn.configure(
+            text="⏹ Cancel Update",
+            fg_color="#E53935",
+            hover_color="#C62828",
+            text_color="#FFFFFF",
+        )
+        self.progress_bar.set(0.0)
+        self.pct_label.configure(text="0%")
+        self.status_label.configure(text="Starting update...", text_color="#FFB74D")
+
+        self._append_log("─" * 45)
+        self._append_log(f"Starting library update for: {f_path}")
+        self._append_log(f"Target: {self.target_mode_var.get()} | Re-download audio: {redownload_swapped} | Lyrics: {embed_lyrics}")
+
+        def _worker():
+            try:
+                def cb(msg, prog, stats):
+                    self._msg_queue.put(("status", (msg, prog)))
+                    self._msg_queue.put(("log", msg))
+
+                def cancel_check():
+                    return self._cancel_requested
+
+                res = batch_update_library_explicit_lyrics(
+                    folder=f_path,
+                    target_mode=target_mode,
+                    redownload_swapped=redownload_swapped,
+                    embed_lyrics=embed_lyrics,
+                    max_workers=max_workers,
+                    callback=cb,
+                    cancel_check=cancel_check,
+                )
+                self._msg_queue.put(("complete", res))
+            except Exception as exc:
+                self._msg_queue.put(("error", str(exc)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _close(self):
+        self._closed = True
+        self._cancel_requested = True
         self.destroy()
 
 

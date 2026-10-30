@@ -72,7 +72,8 @@ import requests
 from bs4 import BeautifulSoup
 from mutagen.id3 import (
     APIC, COMM, ID3, ID3NoHeaderError,
-    TALB, TCMP, TDRC, TIT2, TPE1, TPE2, TRCK, TPOS
+    TALB, TCMP, TDRC, TIT2, TPE1, TPE2, TRCK, TPOS,
+    TXXX, USLT
 )
 from mutagen.mp3 import MP3
 
@@ -272,6 +273,8 @@ def _fetch_playlist_spotapi(playlist_id: str) -> Tuple[dict, List[dict]]:
             t_no = data.get("trackNumber") or track_num
             disc_no = data.get("discNumber") or 1
             dur = data.get("trackDuration", {}).get("totalMilliseconds", 0)
+            content_rating = data.get("contentRating") or {}
+            is_explicit = (content_rating.get("label") == "EXPLICIT")
 
             tracks.append({
                 "title": title,
@@ -285,6 +288,7 @@ def _fetch_playlist_spotapi(playlist_id: str) -> Tuple[dict, List[dict]]:
                 "duration_ms": dur,
                 "track_id": t_id,
                 "playlist_pos": track_num,
+                "is_explicit": is_explicit,
             })
             track_num += 1
 
@@ -329,6 +333,7 @@ def _fetch_playlist_embed(playlist_id: str) -> Tuple[dict, List[dict]]:
             "duration_ms": t.get("duration", 0),
             "track_id": track_id,
             "playlist_pos": idx,
+            "is_explicit": bool(t.get("isExplicit")),
         })
 
     return playlist_info, tracks
@@ -361,6 +366,7 @@ def _fetch_single_track(track_id: str) -> Tuple[dict, List[dict]]:
         "duration_ms": entity.get("duration", 0),
         "track_id": track_id,
         "playlist_pos": 1,
+        "is_explicit": bool(entity.get("isExplicit")),
     }
     playlist_info = {
         "name": track_info["title"],
@@ -421,6 +427,7 @@ def _fetch_album_tracks(album_id: str) -> Tuple[dict, List[dict]]:
             "duration_ms": t.get("duration", 0),
             "track_id": track_id,
             "playlist_pos": idx,
+            "is_explicit": bool(t.get("isExplicit")),
         })
 
     playlist_info = {
@@ -485,6 +492,8 @@ def _fetch_album_spotapi(album_id: str) -> Tuple[dict, List[dict]]:
         t_no = tr.get("trackNumber") or idx
         disc_no = tr.get("discNumber") or 1
         dur = tr.get("duration", {}).get("totalMilliseconds", 0) if isinstance(tr.get("duration"), dict) else tr.get("duration", 0)
+        content_rating = tr.get("contentRating") or {}
+        is_explicit = (content_rating.get("label") == "EXPLICIT")
 
         tracks.append({
             "title": tr.get("name", "Unknown"),
@@ -498,6 +507,7 @@ def _fetch_album_spotapi(album_id: str) -> Tuple[dict, List[dict]]:
             "duration_ms": dur,
             "track_id": track_id,
             "playlist_pos": idx,
+            "is_explicit": is_explicit,
         })
 
     playlist_info = {
@@ -531,6 +541,9 @@ def enrich_track_metadata(track: dict) -> dict:
             if images:
                 best = max(images, key=lambda x: x.get("maxWidth", 0))
                 track["cover_url"] = best["url"]
+
+        if "is_explicit" not in track:
+            track["is_explicit"] = bool(entity.get("isExplicit"))
     except Exception:
         pass
 
@@ -682,11 +695,115 @@ class DownloadTracker:
 # Audio Download & ID3 Metadata Tagging
 # ──────────────────────────────────────────────────────────────────────────────
 
-def build_search_query(track: dict) -> str:
+PROFANITY_MAP = {
+    r"\bfuck(ing|ed|er|s|in)?\b": lambda m: m.group(0)[0] + "***" + (m.group(1) or ""),
+    r"\bmotherfuck(ing|ed|er|s|in)?\b": lambda m: "m****fuck" + (m.group(1) or ""),
+    r"\bshit(s|ty)?\b": lambda m: m.group(0)[0] + "***" + (m.group(1) or ""),
+    r"\bbitch(es)?\b": lambda m: m.group(0)[0] + "****" + (m.group(1) or ""),
+    r"\bass(hole|holes)?\b": lambda m: m.group(0)[0] + "**" + (m.group(1) or ""),
+    r"\bnigg(a|as|er|ers)\b": lambda m: m.group(0)[0] + "****" + (m.group(1) or ""),
+    r"\bdick(s)?\b": lambda m: m.group(0)[0] + "***" + (m.group(1) or ""),
+    r"\bpuss(y|ies)\b": lambda m: m.group(0)[0] + "***" + (m.group(1) or ""),
+    r"\bcunt(s)?\b": lambda m: m.group(0)[0] + "***" + (m.group(1) or ""),
+    r"\bwhore(s)?\b": lambda m: m.group(0)[0] + "***" + (m.group(1) or ""),
+    r"\bslut(s)?\b": lambda m: m.group(0)[0] + "***" + (m.group(1) or ""),
+    r"\bbastard(s)?\b": lambda m: m.group(0)[0] + "******" + (m.group(1) or ""),
+}
+
+
+def censor_lyrics(text: str) -> str:
+    """Censors explicit profanities in lyrics for Clean / Radio Edit playback."""
+    if not text:
+        return ""
+    for pat, repl in PROFANITY_MAP.items():
+        text = re.sub(pat, repl, text, flags=re.IGNORECASE)
+    return text
+
+
+def has_explicit_content(text: str) -> bool:
+    """Checks if a string contains explicit profanities."""
+    if not text:
+        return False
+    for pat in PROFANITY_MAP.keys():
+        if re.search(pat, text, flags=re.IGNORECASE):
+            return True
+    return False
+
+
+def fetch_track_lyrics(
+    artist: str,
+    title: str,
+    album: str = "",
+    duration_s: float = 0.0,
+    clean_mode: bool = False,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Fetches plain and synchronized lyrics from LRCLIB.
+    Returns (plain_lyrics, synced_lyrics).
+    If clean_mode is True, censors explicit profanities in the lyrics text.
+    """
+    plain = None
+    synced = None
+
+    clean_artist = re.sub(r"\(feat\..*?\)", "", artist, flags=re.IGNORECASE).split(",")[0].strip()
+    clean_title = re.sub(r"\(feat\..*?\)", "", title, flags=re.IGNORECASE).strip()
+
+    try:
+        params = {"artist_name": clean_artist, "track_name": clean_title}
+        if album:
+            params["album_name"] = album
+        if duration_s > 0:
+            params["duration"] = round(duration_s)
+        resp = requests.get("https://lrclib.net/api/get", params=params, headers=HEADERS, timeout=6)
+        if resp.status_code == 200:
+            data = resp.json()
+            plain = data.get("plainLyrics")
+            synced = data.get("syncedLyrics")
+    except Exception:
+        pass
+
+    if not plain and not synced:
+        try:
+            q = f"{clean_artist} {clean_title}"
+            resp = requests.get("https://lrclib.net/api/search", params={"q": q}, headers=HEADERS, timeout=6)
+            if resp.status_code == 200:
+                items = resp.json()
+                if items and isinstance(items, list):
+                    best = items[0]
+                    plain = best.get("plainLyrics")
+                    synced = best.get("syncedLyrics")
+        except Exception:
+            pass
+
+    if clean_mode:
+        if plain:
+            plain = censor_lyrics(plain)
+        if synced:
+            synced = censor_lyrics(synced)
+
+    return plain, synced
+
+
+def build_search_query(track: dict, explicit_mode: str = "explicit") -> str:
     """Build a search query for yt-dlp to find the best audio stream."""
     artist = track.get("artist", "")
     title = track.get("title", "")
-    return f"{artist} - {title} audio"
+    clean_title = re.sub(r"[\(\[](clean|radio\s*edit|explicit)[\)\]]", "", title, flags=re.IGNORECASE).strip()
+    if not clean_title:
+        clean_title = title
+    is_exp = track.get("is_explicit", False)
+    clean_mode = (explicit_mode.lower() == "clean")
+
+    if clean_mode:
+        if is_exp:
+            return f"{artist} - {clean_title} clean audio"
+        else:
+            return f"{artist} - {clean_title} audio"
+    else:
+        if is_exp:
+            return f"{artist} - {clean_title} explicit audio"
+        else:
+            return f"{artist} - {clean_title} audio"
 
 
 def download_track_audio(
@@ -695,11 +812,12 @@ def download_track_audio(
     fmt: str = "mp3",
     bitrate: str = "320k",
     verbose: bool = False,
+    explicit_mode: str = "explicit",
 ) -> bool:
     """
     Downloads audio using yt-dlp with FFmpeg audio conversion.
     """
-    query = build_search_query(track)
+    query = build_search_query(track, explicit_mode=explicit_mode)
     temp_tmpl = str(output_path.with_suffix(".%(ext)s"))
 
     ydl_opts = {
@@ -744,12 +862,19 @@ def download_image_bytes(url: Optional[str]) -> Optional[bytes]:
         return None
 
 
-def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[bytes]) -> bool:
+def embed_id3_metadata(
+    audio_path: Path,
+    track: dict,
+    cover_bytes: Optional[bytes],
+    lyrics_text: Optional[str] = None,
+    explicit_mode: str = "explicit",
+) -> bool:
     """
     Embed metadata & cover art into audio files (MP3, FLAC, M4A, Opus, etc.)
     for full compatibility with media players and file explorers (iTunes, Apple Music, VLC).
     Ensures Album Artist (TPE2 / aART / albumartist) is correctly set so albums
     with featured guest singers stay properly grouped into a single album in Apple Music/iTunes.
+    Embeds synchronized & unsynchronized lyrics (USLT / \xa9lyr) and iTunes Advisory tags.
     """
     ext = audio_path.suffix.lower()
 
@@ -780,6 +905,10 @@ def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[byte
         or "soundtrack" in album.lower()
     )
 
+    is_exp = bool(track.get("is_explicit") or has_explicit_content(lyrics_text or ""))
+    clean_mode = (explicit_mode.lower() == "clean")
+    advisory_rating = 2 if (clean_mode and is_exp) else (1 if is_exp else 0)
+
     try:
         if ext == ".mp3":
             audio = MP3(str(audio_path), ID3=ID3)
@@ -803,6 +932,19 @@ def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[byte
                 encoding=3, lang="eng", desc="Comment",
                 text="Downloaded with spotify-dl"
             ))
+
+            if lyrics_text:
+                try:
+                    tags.delall("USLT")
+                    tags.add(USLT(encoding=3, lang="eng", desc="", text=lyrics_text))
+                except Exception:
+                    pass
+
+            try:
+                tags.delall("TXXX:ITUNESADVISORY")
+                tags.add(TXXX(encoding=3, desc="ITUNESADVISORY", text=[str(advisory_rating)]))
+            except Exception:
+                pass
 
             if cover_bytes:
                 mime = "image/jpeg"
@@ -828,6 +970,9 @@ def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[byte
                 audio["albumartist"] = album_artist
             if is_compilation:
                 audio["compilation"] = "1"
+            if lyrics_text:
+                audio["lyrics"] = lyrics_text
+            audio["itunesadvisory"] = [str(advisory_rating)]
             audio["tracknumber"] = str(track_num)
             audio["discnumber"] = str(disc_num)
             if release:
@@ -851,6 +996,9 @@ def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[byte
                 audio["aART"] = [album_artist]
             if is_compilation:
                 audio["cpil"] = True
+            if lyrics_text:
+                audio["\xa9lyr"] = [lyrics_text]
+            audio["rtng"] = [advisory_rating]
             try:
                 audio["trkn"] = [(int(track_num), 0)]
             except Exception:
@@ -874,6 +1022,8 @@ def embed_id3_metadata(audio_path: Path, track: dict, cover_bytes: Optional[byte
             audio["album"] = album
             if album_artist:
                 audio["albumartist"] = album_artist
+            if lyrics_text:
+                audio["lyrics"] = lyrics_text
             audio["tracknumber"] = str(track_num)
             if release:
                 audio["date"] = release[:10]
@@ -1424,6 +1574,255 @@ def fix_library_album_tags(folder: Path, callback=None) -> dict:
     }
 
 
+def batch_update_library_explicit_lyrics(
+    folder: Path,
+    target_mode: str = "explicit",
+    redownload_swapped: bool = True,
+    embed_lyrics: bool = True,
+    fmt: str = "mp3",
+    bitrate: str = "320k",
+    max_workers: int = 4,
+    callback: Optional[Callable[[str, float, dict], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> dict:
+    """
+    Scans an audio folder and updates all tracks to either Explicit (original uncensored)
+    or Clean (radio edit).
+    - If redownload_swapped is True, detects songs whose audio version needs to be swapped
+      (e.g. from explicit to clean radio edit, or clean to explicit) and re-downloads the
+      matching audio stream while preserving cover art and metadata.
+    - If embed_lyrics is True, fetches lyrics from LRCLIB (censoring profanities if Clean mode)
+      and embeds them into the song tags (USLT for MP3 / \xa9lyr for M4A) for Apple Music & iOS.
+    - Updates iTunes Advisory rating tags ([E] for Explicit, [Clean] for Clean).
+    """
+    if not folder.exists():
+        raise FileNotFoundError(f"Folder not found: {folder}")
+
+    clean_target = (target_mode.lower() == "clean")
+    audio_files = [
+        f for f in folder.iterdir()
+        if f.is_file() and f.suffix.lower() in (".mp3", ".m4a", ".flac") and f.stat().st_size > 50000
+    ]
+    total_files = len(audio_files)
+    if total_files == 0:
+        return {"total_files": 0, "swapped_audio": 0, "tags_updated": 0, "failed": 0, "cancelled": False}
+
+    swapped_count = 0
+    tags_count = 0
+    failed_count = 0
+    progress_lock = threading.Lock()
+
+    def _notify(status: str, prog: float, stats: dict):
+        if callback:
+            try:
+                callback(status, prog, stats)
+            except Exception:
+                pass
+
+    _notify(f"Found {total_files} songs. Inspecting explicit status & lyrics...", 0.0, {
+        "processed": 0, "total": total_files, "swapped": 0, "updated": 0
+    })
+
+    def _worker(idx: int, file_path: Path):
+        nonlocal swapped_count, tags_count, failed_count
+        if cancel_check and cancel_check():
+            return False
+
+        ext = file_path.suffix.lower()
+        title = ""
+        artist = ""
+        album = ""
+        album_artist = ""
+        current_lyrics = ""
+        current_advisory = ""
+        cover_bytes = None
+
+        try:
+            if ext == ".mp3":
+                id3 = ID3(str(file_path))
+                title = str(id3.get("TIT2") or file_path.stem)
+                artist = str(id3.get("TPE1") or "")
+                album = str(id3.get("TALB") or "")
+                album_artist = str(id3.get("TPE2") or (artist.split(",")[0].strip() if artist else ""))
+                uslt_frames = id3.getall("USLT")
+                if uslt_frames:
+                    current_lyrics = str(uslt_frames[0].text)
+                txxx_adv = id3.get("TXXX:ITUNESADVISORY")
+                if txxx_adv and hasattr(txxx_adv, "text") and txxx_adv.text:
+                    current_advisory = str(txxx_adv.text[0])
+                for k in id3.keys():
+                    if k.startswith("APIC"):
+                        cover_bytes = id3[k].data
+                        break
+            elif ext in (".m4a", ".mp4") and MP4:
+                mp4 = MP4(str(file_path))
+                title = str(mp4.get("\xa9nam", [file_path.stem])[0])
+                artist = str(mp4.get("\xa9ART", [""])[0])
+                album = str(mp4.get("\xa9alb", [""])[0])
+                album_artist = str(mp4.get("aART", [""])[0])
+                current_lyrics = str(mp4.get("\xa9lyr", [""])[0])
+                rtng_val = mp4.get("rtng", [None])[0]
+                if rtng_val is not None:
+                    current_advisory = str(rtng_val)
+                cov = mp4.get("covr", [None])[0]
+                if cov:
+                    cover_bytes = bytes(cov)
+            elif ext == ".flac" and FLAC:
+                fl = FLAC(str(file_path))
+                title = str(fl.get("title", [file_path.stem])[0])
+                artist = str(fl.get("artist", [""])[0])
+                album = str(fl.get("album", [""])[0])
+                album_artist = str(fl.get("albumartist", [""])[0])
+                current_lyrics = str(fl.get("lyrics", [""])[0])
+                current_advisory = str(fl.get("itunesadvisory", [""])[0])
+                if fl.pictures:
+                    cover_bytes = fl.pictures[0].data
+        except Exception:
+            title = file_path.stem
+
+        if not artist and " - " in file_path.stem:
+            parts = file_path.stem.split(" - ", 1)
+            artist = parts[0].strip()
+            title = parts[1].strip()
+
+        # Check explicit indicators
+        is_known_explicit = False
+        is_known_clean = False
+
+        if current_advisory == "1":
+            is_known_explicit = True
+        elif current_advisory == "2":
+            is_known_clean = True
+
+        low_title = title.lower()
+        if "clean" in low_title or "radio edit" in low_title:
+            is_known_clean = True
+        elif "explicit" in low_title:
+            is_known_explicit = True
+
+        # Check lyrics for profanity
+        if current_lyrics:
+            if has_explicit_content(current_lyrics):
+                is_known_explicit = True
+
+        # If still undetermined, check LRCLIB
+        plain_lyrics = None
+        synced_lyrics = None
+        if not current_lyrics and embed_lyrics:
+            plain_lyrics, synced_lyrics = fetch_track_lyrics(artist, title, album, clean_mode=False)
+            if plain_lyrics and has_explicit_content(plain_lyrics):
+                is_known_explicit = True
+
+        # Determine if audio needs swapping
+        needs_audio_swap = False
+        if clean_target:
+            if is_known_explicit and not is_known_clean:
+                needs_audio_swap = True
+        else:
+            if is_known_clean:
+                needs_audio_swap = True
+
+        did_swap = False
+        if needs_audio_swap and redownload_swapped:
+            with progress_lock:
+                done = swapped_count + tags_count + failed_count
+                _notify(f"[{done+1}/{total_files}] Downloading {target_mode} audio: {artist} - {title}", done / total_files, {
+                    "processed": done, "total": total_files, "swapped": swapped_count, "updated": tags_count
+                })
+
+            track_dict = {
+                "title": title,
+                "artist": artist,
+                "album_name": album,
+                "album_artist": album_artist,
+                "is_explicit": is_known_explicit,
+            }
+            target_fmt = ext.lstrip(".")
+            temp_swap = file_path.with_name(f"{file_path.stem}_swapped_{int(time.time()*1000)}.{target_fmt}")
+            dl_ok = download_track_audio(
+                track_dict, temp_swap, fmt=target_fmt, bitrate=bitrate, explicit_mode=target_mode
+            )
+            if dl_ok and temp_swap.exists() and temp_swap.stat().st_size > 50000:
+                p_lyr, s_lyr = fetch_track_lyrics(artist, title, album, clean_mode=clean_target)
+                lyr_to_save = p_lyr or (censor_lyrics(current_lyrics) if clean_target else current_lyrics)
+                embed_id3_metadata(
+                    temp_swap,
+                    track_dict,
+                    cover_bytes,
+                    lyrics_text=lyr_to_save,
+                    explicit_mode=target_mode,
+                )
+                if s_lyr:
+                    try:
+                        file_path.with_suffix(".lrc").write_text(s_lyr, encoding="utf-8")
+                    except Exception:
+                        pass
+                temp_swap.replace(file_path)
+                did_swap = True
+            else:
+                if temp_swap.exists():
+                    try:
+                        temp_swap.unlink()
+                    except Exception:
+                        pass
+
+        if not did_swap:
+            lyrics_to_embed = current_lyrics
+            if clean_target and lyrics_to_embed:
+                lyrics_to_embed = censor_lyrics(lyrics_to_embed)
+            elif not lyrics_to_embed and embed_lyrics:
+                p_lyr, s_lyr = fetch_track_lyrics(artist, title, album, clean_mode=clean_target)
+                lyrics_to_embed = p_lyr
+                if s_lyr:
+                    try:
+                        file_path.with_suffix(".lrc").write_text(s_lyr, encoding="utf-8")
+                    except Exception:
+                        pass
+
+            track_dict = {
+                "title": title,
+                "artist": artist,
+                "album_name": album,
+                "album_artist": album_artist,
+                "is_explicit": is_known_explicit,
+            }
+            embed_id3_metadata(
+                file_path,
+                track_dict,
+                cover_bytes,
+                lyrics_text=lyrics_to_embed,
+                explicit_mode=target_mode,
+            )
+
+        with progress_lock:
+            if did_swap:
+                swapped_count += 1
+            else:
+                tags_count += 1
+            done = swapped_count + tags_count + failed_count
+            _notify(f"[{done}/{total_files}] Updated: {file_path.name}", done / total_files, {
+                "processed": done, "total": total_files, "swapped": swapped_count, "updated": tags_count
+            })
+
+    workers = max(1, min(max_workers, total_files))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_worker, idx, f): f for idx, f in enumerate(audio_files)}
+        for future in concurrent.futures.as_completed(futures):
+            if cancel_check and cancel_check():
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+
+    result = {
+        "total_files": total_files,
+        "swapped_audio": swapped_count,
+        "tags_updated": tags_count,
+        "failed": failed_count,
+        "cancelled": bool(cancel_check and cancel_check()),
+    }
+    _notify(f"Update complete! {swapped_count} audio files swapped, {tags_count} tags & lyrics updated.", 1.0, result)
+    return result
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main Pipeline
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1440,6 +1839,8 @@ def run_download(
     max_workers: int = 4,
     callback: Optional[Callable[[str, float, Optional[str]], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    explicit_mode: str = "explicit",
+    embed_lyrics: bool = True,
 ) -> dict:
     """
     Executes the download workflow:
@@ -1563,7 +1964,7 @@ def run_download(
 
         # Download audio stream
         ok = download_track_audio(
-            track, out_path, fmt=fmt, bitrate=bitrate, verbose=verbose
+            track, out_path, fmt=fmt, bitrate=bitrate, verbose=verbose, explicit_mode=explicit_mode
         )
 
         if not ok or (cancel_check and cancel_check()):
@@ -1577,8 +1978,30 @@ def run_download(
         # Fetch cover art
         cover_bytes = download_image_bytes(track.get("cover_url"))
 
-        # Embed metadata
-        tagged = embed_id3_metadata(out_path, track, cover_bytes)
+        # Fetch lyrics
+        plain_lyrics = None
+        if embed_lyrics:
+            plain_lyrics, synced_lyrics = fetch_track_lyrics(
+                artist=artist,
+                title=title,
+                album=track.get("album_name", ""),
+                duration_s=track.get("duration_ms", 0) / 1000.0,
+                clean_mode=(explicit_mode.lower() == "clean"),
+            )
+            if synced_lyrics:
+                try:
+                    out_path.with_suffix(".lrc").write_text(synced_lyrics, encoding="utf-8")
+                except Exception:
+                    pass
+
+        # Embed metadata, lyrics & advisory rating
+        tagged = embed_id3_metadata(
+            out_path,
+            track,
+            cover_bytes,
+            lyrics_text=plain_lyrics,
+            explicit_mode=explicit_mode,
+        )
 
         with progress_lock:
             tracker.mark_downloaded(track, out_path)
@@ -1748,12 +2171,58 @@ Examples:
         help="Fix fragmented albums for iTunes/Apple Music by unifying Album Artist tags without re-encoding audio",
     )
     parser.add_argument(
+        "--explicit-mode",
+        choices=["explicit", "clean"],
+        default="explicit",
+        help="Download explicit (uncensored) or clean (radio edit) tracks (default: explicit)",
+    )
+    parser.add_argument(
+        "--no-lyrics",
+        action="store_true",
+        help="Do not fetch or embed lyrics into audio files",
+    )
+    parser.add_argument(
+        "--update-explicit",
+        metavar="FOLDER",
+        default=None,
+        help="Update existing music files in a folder to Explicit or Clean audio/lyrics",
+    )
+    parser.add_argument(
+        "--no-redownload",
+        action="store_true",
+        help="When updating library explicit mode, only update tags & lyrics in-place without re-downloading audio",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version="spotify-dl 2.1.0",
     )
 
     args = parser.parse_args()
+
+    if args.update_explicit:
+        target_folder = Path(args.update_explicit).expanduser().resolve()
+        safe_print(f"\n{bold('=== Updating Library to ' + args.explicit_mode.capitalize() + ' & Lyrics ===')}")
+        safe_print(f"  Target Folder : {cyan(str(target_folder))}")
+        safe_print(f"  Target Mode   : {bold(args.explicit_mode.capitalize())}")
+        safe_print(f"  Re-download   : {'No (tags/lyrics only)' if args.no_redownload else 'Yes (swapping audio)'}")
+        safe_print(f"  Embed Lyrics  : {'No' if args.no_lyrics else 'Yes'}\n")
+        res = batch_update_library_explicit_lyrics(
+            folder=target_folder,
+            target_mode=args.explicit_mode,
+            redownload_swapped=not args.no_redownload,
+            embed_lyrics=not args.no_lyrics,
+            fmt=args.format,
+            bitrate=args.bitrate,
+            max_workers=args.threads,
+            callback=lambda msg, prog, stats: safe_print(f"  [*] {msg}") if "Updated:" in msg or "Downloading" in msg else None,
+        )
+        safe_print(f"\n  {green('[OK] Library Update Complete!')}")
+        safe_print(f"  Total Scanned : {res.get('total_files', 0)} songs")
+        safe_print(f"  Audio Swapped : {res.get('swapped_audio', 0)} songs")
+        safe_print(f"  Tags/Lyrics   : {res.get('tags_updated', 0)} songs")
+        safe_print()
+        return
 
     if args.fix_tags:
         target_folder = Path(args.fix_tags).expanduser().resolve()
@@ -1811,6 +2280,8 @@ Examples:
         verbose=args.verbose,
         delay=args.delay,
         max_workers=args.threads,
+        explicit_mode=args.explicit_mode,
+        embed_lyrics=not args.no_lyrics,
     )
 
 

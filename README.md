@@ -87,10 +87,58 @@ python spotify_dl.py --downsize "C:\Music\MyPlaylist" --bitrate 192k
 | `-t`, `--threads` | Number of parallel song downloads | `4` |
 | `--format` | Output audio format (`mp3`, `m4a`, `flac`, `opus`, `wav`) | `mp3` |
 | `--bitrate` | Audio bitrate (`128k`, `160k`, `192k`, `256k`, `320k`) | `320k` |
+| `--explicit-mode` | Audio version: `explicit` (uncensored) or `clean` (radio edit) | `explicit` |
+| `--no-lyrics` | Do not fetch or embed lyrics into audio files | `False` |
 | `--force` | Re-download songs even if already present | `False` |
 | `--limit` | Limit download to first N tracks | `None` (all) |
 | `--downsize` | Downsize/transcode all songs in a folder to target bitrate | `None` |
 | `--fix-tags` | Fix fragmented albums for iTunes/Apple Music by unifying Album Artist | `None` |
+| `--update-explicit` | Update existing songs in a folder to Explicit or Clean audio/lyrics | `None` |
+| `--no-redownload` | When updating explicit mode, only update tags/lyrics without re-downloading audio | `False` |
+
+---
+
+## Explicit vs Clean Audio and Lyrics Management
+
+Spotify Downloader lets you choose whether to download explicit uncensored songs or clean radio edits, and automatically embeds synchronized lyrics into your music files for Apple Music and iOS.
+
+### Downloading Explicit or Clean Songs
+
+1. **In the Desktop App**:
+   - In **Download Settings**, select **Audio Version**:
+     - **Explicit (Uncensored)**: Downloads the original uncensored audio stream.
+     - **Clean (Radio Edit)**: Downloads the official radio edit audio stream and automatically censors profanities in the lyrics.
+   - Keep **Embed lyrics into songs (Apple Music / iOS)** checked to automatically embed synchronized lyrics (`USLT` for MP3, `©lyr` for M4A, `lyrics` for FLAC) and companion `.lrc` files.
+   - On iOS 7+ and Apple Music, tapping the album artwork on the player screen instantly displays the embedded lyrics.
+
+2. **In the Terminal (CLI)**:
+   ```powershell
+   # Download clean radio edit version with lyrics:
+   python spotify_dl.py https://open.spotify.com/playlist/xxx --explicit-mode clean
+
+   # Download explicit uncensored without embedding lyrics:
+   python spotify_dl.py https://open.spotify.com/playlist/xxx --explicit-mode explicit --no-lyrics
+   ```
+
+### Updating Existing Songs in Your Library
+
+If you already downloaded songs and want to switch them between Explicit and Clean versions, or embed missing lyrics:
+
+1. **In the Desktop App**:
+   - In the **Download Folder** card, click **Explicit & Lyrics...**.
+   - Choose your **Target Version** (`Clean (Radio Edit)` or `Explicit (Uncensored)`).
+   - Check **Re-download audio when version differs** to swap explicit audio for clean radio edit audio (or vice-versa) while keeping album artwork and metadata intact.
+   - Check **Fetch & embed lyrics into song tags** to fetch lyrics and embed them into the files.
+   - Click **Start Updating Library**.
+
+2. **In the Terminal (CLI)**:
+   ```powershell
+   # Convert all existing library songs to Clean radio edits and embed lyrics:
+   python spotify_dl.py --update-explicit "C:\Users\mehul\Music\Spotify Downloads" --explicit-mode clean
+
+   # Only update tags and lyrics without re-downloading audio streams:
+   python spotify_dl.py --update-explicit "C:\Users\mehul\Music\Spotify Downloads" --explicit-mode explicit --no-redownload
+   ```
 
 ---
 
