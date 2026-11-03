@@ -769,9 +769,22 @@ def fetch_track_lyrics(
             if resp.status_code == 200:
                 items = resp.json()
                 if items and isinstance(items, list):
-                    best = items[0]
-                    plain = best.get("plainLyrics")
-                    synced = best.get("syncedLyrics")
+                    for item in items:
+                        if item.get("plainLyrics") or item.get("syncedLyrics"):
+                            plain = item.get("plainLyrics")
+                            synced = item.get("syncedLyrics")
+                            break
+        except Exception:
+            pass
+
+    # Secondary fallback to lyrics.ovh if LRCLIB returned no plain lyrics or was busy
+    if not plain:
+        try:
+            resp = requests.get(f"https://api.lyrics.ovh/v1/{clean_artist}/{clean_title}", headers=HEADERS, timeout=5)
+            if resp.status_code == 200:
+                ovh_lyrics = resp.json().get("lyrics", "").strip()
+                if ovh_lyrics:
+                    plain = ovh_lyrics
         except Exception:
             pass
 
@@ -936,7 +949,7 @@ def embed_id3_metadata(
             if lyrics_text:
                 try:
                     tags.delall("USLT")
-                    tags.add(USLT(encoding=3, lang="eng", desc="", text=lyrics_text))
+                    tags.add(USLT(encoding=1, lang="eng", desc="", text=lyrics_text))
                 except Exception:
                     pass
 
