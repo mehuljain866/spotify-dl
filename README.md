@@ -1,5 +1,9 @@
 # Spotify Downloader
 
+<p align="center">
+  <img src="assets/icon.png" alt="Spotify Downloader Icon" width="120" height="120" />
+</p>
+
 A fast, modern desktop application and CLI that downloads Spotify playlists, albums, or individual tracks — with full ID3 metadata, high-resolution album art, and synchronized lyrics embedded.
 
 <p align="center">
