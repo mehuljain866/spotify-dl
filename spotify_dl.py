@@ -730,28 +730,139 @@ def has_explicit_content(text: str) -> bool:
     return False
 
 
+# Devanagari to Roman (Hinglish) mappings for transliterating Hindi lyrics
+DEVANAGARI_VOWELS = {
+    "\u0905": "a", "\u0906": "aa", "\u0907": "i", "\u0908": "i",
+    "\u0909": "u", "\u090a": "u", "\u090b": "ri", "\u090f": "e",
+    "\u0910": "ai", "\u0913": "o", "\u0914": "au",
+}
+
+DEVANAGARI_MATRAS = {
+    "\u093e": "a", "\u093f": "i", "\u0940": "i", "\u0941": "u",
+    "\u0942": "u", "\u0943": "ri", "\u0947": "e", "\u0948": "ai",
+    "\u094b": "o", "\u094c": "au",
+}
+
+DEVANAGARI_CONSONANTS = {
+    "\u0915": "k", "\u0916": "kh", "\u0917": "g", "\u0918": "gh", "\u0919": "ng",
+    "\u091a": "ch", "\u091b": "chh", "\u091c": "j", "\u091d": "jh", "\u091e": "ny",
+    "\u091f": "t", "\u0920": "th", "\u0921": "d", "\u0922": "dh", "\u0923": "n",
+    "\u0924": "t", "\u0925": "th", "\u0926": "d", "\u0927": "dh", "\u0928": "n",
+    "\u092a": "p", "\u092b": "ph", "\u092c": "b", "\u092d": "bh", "\u092e": "m",
+    "\u092f": "y", "\u0930": "r", "\u0932": "l", "\u0935": "v",
+    "\u0936": "sh", "\u0937": "sh", "\u0938": "s", "\u0939": "h",
+    "\u0958": "q", "\u0959": "kh", "\u095a": "gh", "\u095b": "z",
+    "\u095c": "r", "\u095d": "rh", "\u095e": "f",
+}
+
+DEVANAGARI_SPECIAL = {"\u0902": "n", "\u0901": "n", "\u0903": "h"}
+DEVANAGARI_VIRAMA = "\u094d"
+
+
+def devanagari_to_hinglish(text: str) -> str:
+    """
+    Transliterates Devanagari Hindi text to Romanized Hinglish (English alphabet)
+    while preserving timestamp headers, punctuation, and English words.
+    Enables users to sing along with Hindi songs in familiar Latin script.
+    """
+    if not text or not any("\u0900" <= c <= "\u097F" for c in text):
+        return text
+
+    # Pre-compose common nukta combinations
+    text = (
+        text.replace("\u0915\u093c", "\u0958")
+        .replace("\u0916\u093c", "\u0959")
+        .replace("\u0917\u093c", "\u095a")
+        .replace("\u091c\u093c", "\u095b")
+        .replace("\u0921\u093c", "\u095c")
+        .replace("\u0922\u093c", "\u095d")
+        .replace("\u092b\u093c", "\u095e")
+    )
+
+    lines = []
+    for line in text.split("\n"):
+        ts_match = re.match(r"^(\[\d+:\d+(?:\.\d+)?\])\s*(.*)$", line)
+        ts_prefix = ""
+        content = line
+        if ts_match:
+            ts_prefix = ts_match.group(1) + " "
+            content = ts_match.group(2)
+
+        words = content.split(" ")
+        roman_words = []
+        for word in words:
+            if not any("\u0900" <= c <= "\u097F" for c in word):
+                roman_words.append(word)
+                continue
+
+            chars = list(word)
+            n = len(chars)
+            res = []
+            for i in range(n):
+                c = chars[i]
+                next_c = chars[i + 1] if i + 1 < n else None
+
+                if c in DEVANAGARI_VOWELS:
+                    res.append(DEVANAGARI_VOWELS[c])
+                elif c in DEVANAGARI_CONSONANTS:
+                    base = DEVANAGARI_CONSONANTS[c]
+                    if next_c in DEVANAGARI_MATRAS or next_c == DEVANAGARI_VIRAMA:
+                        res.append(base)
+                    elif next_c is None:
+                        # Schwa deletion at word ending (single-letter words keep 'a')
+                        if n == 1:
+                            res.append(base + "a")
+                        else:
+                            res.append(base)
+                    elif next_c in DEVANAGARI_SPECIAL:
+                        res.append(base + "a")
+                    elif next_c in DEVANAGARI_CONSONANTS or next_c in DEVANAGARI_VOWELS:
+                        res.append(base + "a")
+                    else:
+                        res.append(base)
+                elif c in DEVANAGARI_MATRAS:
+                    res.append(DEVANAGARI_MATRAS[c])
+                elif c in DEVANAGARI_SPECIAL:
+                    res.append(DEVANAGARI_SPECIAL[c])
+                elif c == DEVANAGARI_VIRAMA:
+                    pass
+                else:
+                    res.append(c)
+            roman_words.append("".join(res))
+        lines.append((ts_prefix + " ".join(roman_words)).rstrip())
+    return "\n".join(lines)
+
+
 def fetch_track_lyrics(
     artist: str,
     title: str,
     album: str = "",
     duration_s: float = 0.0,
     clean_mode: bool = False,
+    lyrics_script: str = "hinglish",
 ) -> Tuple[Optional[str], Optional[str]]:
     """
-    Fetches plain and synchronized lyrics from LRCLIB.
+    Fetches plain and synchronized lyrics from LRCLIB with lyrics.ovh fallback.
     Returns (plain_lyrics, synced_lyrics).
     If clean_mode is True, censors explicit profanities in the lyrics text.
+    If lyrics_script is 'hinglish', transliterates Hindi/Devanagari lyrics to Roman letters.
     """
     plain = None
     synced = None
 
-    clean_artist = re.sub(r"\(feat\..*?\)", "", artist, flags=re.IGNORECASE).split(",")[0].strip()
-    clean_title = re.sub(r"\(feat\..*?\)", "", title, flags=re.IGNORECASE).strip()
+    # Clean artist: extract primary artist, strip feat/with/etc.
+    clean_artist = re.sub(r"[\(\[](feat|ft|with)\.?.*?[\)\]]", "", artist, flags=re.IGNORECASE)
+    clean_artist = clean_artist.split(",")[0].split("/")[0].split("&")[0].strip() or artist
 
+    # Clean title: strip [feat. ...], (feat. ...), (From "..."), (Remastered...), etc.
+    clean_title = re.sub(r"[\(\[](feat|ft|with|from|remastered|version|live|deluxe|bonus).*?[\)\]]", "", title, flags=re.IGNORECASE)
+    clean_title = re.sub(r"\s+-\s+.*remaster.*$", "", clean_title, flags=re.IGNORECASE)
+    clean_title = re.sub(r"\s+-\s+.*radio edit.*$", "", clean_title, flags=re.IGNORECASE)
+    clean_title = clean_title.strip() or title
+
+    # 1. Try LRCLIB exact get without album first (more reliable because compilation album names often mismatch)
     try:
         params = {"artist_name": clean_artist, "track_name": clean_title}
-        if album:
-            params["album_name"] = album
         if duration_s > 0:
             params["duration"] = round(duration_s)
         resp = requests.get("https://lrclib.net/api/get", params=params, headers=HEADERS, timeout=6)
@@ -762,6 +873,7 @@ def fetch_track_lyrics(
     except Exception:
         pass
 
+    # 2. Try LRCLIB search if get failed
     if not plain and not synced:
         try:
             q = f"{clean_artist} {clean_title}"
@@ -777,10 +889,10 @@ def fetch_track_lyrics(
         except Exception:
             pass
 
-    # Secondary fallback to lyrics.ovh if LRCLIB returned no plain lyrics or was busy
+    # 3. Secondary fallback to lyrics.ovh if LRCLIB returned no plain lyrics or was busy (503/404)
     if not plain:
         try:
-            resp = requests.get(f"https://api.lyrics.ovh/v1/{clean_artist}/{clean_title}", headers=HEADERS, timeout=5)
+            resp = requests.get(f"https://api.lyrics.ovh/v1/{clean_artist}/{clean_title}", headers=HEADERS, timeout=6)
             if resp.status_code == 200:
                 ovh_lyrics = resp.json().get("lyrics", "").strip()
                 if ovh_lyrics:
@@ -793,6 +905,12 @@ def fetch_track_lyrics(
             plain = censor_lyrics(plain)
         if synced:
             synced = censor_lyrics(synced)
+
+    if lyrics_script == "hinglish":
+        if plain:
+            plain = devanagari_to_hinglish(plain)
+        if synced:
+            synced = devanagari_to_hinglish(synced)
 
     return plain, synced
 
@@ -1597,6 +1715,7 @@ def batch_update_library_explicit_lyrics(
     max_workers: int = 4,
     callback: Optional[Callable[[str, float, dict], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    lyrics_script: str = "hinglish",
 ) -> dict:
     """
     Scans an audio folder and updates all tracks to either Explicit (original uncensored)
@@ -1722,7 +1841,9 @@ def batch_update_library_explicit_lyrics(
         plain_lyrics = None
         synced_lyrics = None
         if not current_lyrics and embed_lyrics:
-            plain_lyrics, synced_lyrics = fetch_track_lyrics(artist, title, album, clean_mode=False)
+            plain_lyrics, synced_lyrics = fetch_track_lyrics(
+                artist, title, album, clean_mode=False, lyrics_script=lyrics_script
+            )
             if plain_lyrics and has_explicit_content(plain_lyrics):
                 is_known_explicit = True
 
@@ -1756,8 +1877,15 @@ def batch_update_library_explicit_lyrics(
                 track_dict, temp_swap, fmt=target_fmt, bitrate=bitrate, explicit_mode=target_mode
             )
             if dl_ok and temp_swap.exists() and temp_swap.stat().st_size > 50000:
-                p_lyr, s_lyr = fetch_track_lyrics(artist, title, album, clean_mode=clean_target)
+                p_lyr, s_lyr = fetch_track_lyrics(
+                    artist, title, album, clean_mode=clean_target, lyrics_script=lyrics_script
+                )
                 lyr_to_save = p_lyr or (censor_lyrics(current_lyrics) if clean_target else current_lyrics)
+                if lyrics_script == "hinglish" and lyr_to_save:
+                    lyr_to_save = devanagari_to_hinglish(lyr_to_save)
+                if lyrics_script == "hinglish" and s_lyr:
+                    s_lyr = devanagari_to_hinglish(s_lyr)
+
                 embed_id3_metadata(
                     temp_swap,
                     track_dict,
@@ -1780,17 +1908,27 @@ def batch_update_library_explicit_lyrics(
                         pass
 
         if not did_swap:
-            lyrics_to_embed = current_lyrics
+            lyrics_to_embed = current_lyrics or plain_lyrics
             if clean_target and lyrics_to_embed:
                 lyrics_to_embed = censor_lyrics(lyrics_to_embed)
             elif not lyrics_to_embed and embed_lyrics:
-                p_lyr, s_lyr = fetch_track_lyrics(artist, title, album, clean_mode=clean_target)
+                p_lyr, s_lyr = fetch_track_lyrics(
+                    artist, title, album, clean_mode=clean_target, lyrics_script=lyrics_script
+                )
                 lyrics_to_embed = p_lyr
                 if s_lyr:
-                    try:
-                        file_path.with_suffix(".lrc").write_text(s_lyr, encoding="utf-8")
-                    except Exception:
-                        pass
+                    synced_lyrics = s_lyr
+
+            if lyrics_script == "hinglish" and lyrics_to_embed:
+                lyrics_to_embed = devanagari_to_hinglish(lyrics_to_embed)
+            if lyrics_script == "hinglish" and synced_lyrics:
+                synced_lyrics = devanagari_to_hinglish(synced_lyrics)
+
+            if synced_lyrics:
+                try:
+                    file_path.with_suffix(".lrc").write_text(synced_lyrics, encoding="utf-8")
+                except Exception:
+                    pass
 
             track_dict = {
                 "title": title,
@@ -1854,6 +1992,7 @@ def run_download(
     cancel_check: Optional[Callable[[], bool]] = None,
     explicit_mode: str = "explicit",
     embed_lyrics: bool = True,
+    lyrics_script: str = "hinglish",
 ) -> dict:
     """
     Executes the download workflow:
@@ -2000,6 +2139,7 @@ def run_download(
                 album=track.get("album_name", ""),
                 duration_s=track.get("duration_ms", 0) / 1000.0,
                 clean_mode=(explicit_mode.lower() == "clean"),
+                lyrics_script=lyrics_script,
             )
             if synced_lyrics:
                 try:
@@ -2195,6 +2335,12 @@ Examples:
         help="Do not fetch or embed lyrics into audio files",
     )
     parser.add_argument(
+        "--lyrics-script",
+        choices=["hinglish", "devanagari", "original"],
+        default="hinglish",
+        help="Preferred script for Hindi lyrics: 'hinglish' (Roman/English alphabet), 'devanagari' (Hindi script), or 'original' (default: hinglish)",
+    )
+    parser.add_argument(
         "--update-explicit",
         metavar="FOLDER",
         default=None,
@@ -2219,7 +2365,8 @@ Examples:
         safe_print(f"  Target Folder : {cyan(str(target_folder))}")
         safe_print(f"  Target Mode   : {bold(args.explicit_mode.capitalize())}")
         safe_print(f"  Re-download   : {'No (tags/lyrics only)' if args.no_redownload else 'Yes (swapping audio)'}")
-        safe_print(f"  Embed Lyrics  : {'No' if args.no_lyrics else 'Yes'}\n")
+        safe_print(f"  Embed Lyrics  : {'No' if args.no_lyrics else 'Yes'}")
+        safe_print(f"  Lyrics Script : {bold(args.lyrics_script.capitalize())}\n")
         res = batch_update_library_explicit_lyrics(
             folder=target_folder,
             target_mode=args.explicit_mode,
@@ -2228,6 +2375,7 @@ Examples:
             fmt=args.format,
             bitrate=args.bitrate,
             max_workers=args.threads,
+            lyrics_script=args.lyrics_script,
             callback=lambda msg, prog, stats: safe_print(f"  [*] {msg}") if "Updated:" in msg or "Downloading" in msg else None,
         )
         safe_print(f"\n  {green('[OK] Library Update Complete!')}")
@@ -2295,6 +2443,7 @@ Examples:
         max_workers=args.threads,
         explicit_mode=args.explicit_mode,
         embed_lyrics=not args.no_lyrics,
+        lyrics_script=args.lyrics_script,
     )
 
 

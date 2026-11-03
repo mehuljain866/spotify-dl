@@ -41,6 +41,7 @@ Prefer a portable single-file app without installing Python? Download from [**La
 - **Blazing Fast Parallel Downloads**: Download up to 4 or 6 songs at the same time concurrently for up to 5x faster downloads. Configurable in the GUI and CLI.
 - **Explicit vs Clean Radio Edit Modes**: Choose whether to download original uncensored tracks or official clean radio edits with profanities filtered from embedded lyrics.
 - **Synchronized Lyrics for Apple Music and iOS**: Automatically queries LRCLIB and embeds lyrics directly into ID3 tags (`USLT` for MP3, `©lyr` for M4A, `lyrics` for FLAC). On iOS 7+ and Apple Music, simply tap the album artwork on the player screen to view the lyrics. Companion `.lrc` files are also generated.
+- **Hindi and Hinglish Lyrics Transliteration**: Choose between Romanized Hinglish (Hindi words in English alphabet for easy singing along), native Devanagari Hindi script, or unmodified database original. Built-in transliteration intelligently converts Devanagari lyrics and timestamps to Latin characters.
 - **Official iTunes Advisory Badges**: Tags songs with Apple Music advisory ratings (`[E]` for Explicit uncensored and `[Clean]` for clean radio edits).
 - **Consolidates Split Albums (Apple Music / iTunes)**: Prevents albums with guest singers (e.g. Gorillaz feat. Snoop Dogg) from splitting into multiple separate 1-song albums on Apple Music and iOS. Unifies `Album Artist` (`TPE2` / `aART`) while keeping individual track artist credits. Includes a 100% lossless repair tool for existing libraries.
 - **Audio Downsizing and Storage Optimizer**: Downsize existing music files to 128k, 160k, or 192k to save massive storage space (up to 60% reduction) with a smart filter that only suggests bitrates lower than your current files. Preserves 100% of ID3 metadata and album art.
@@ -102,6 +103,7 @@ python spotify_dl.py --update-explicit "C:\Music\MyPlaylist" --explicit-mode cle
 | `--bitrate` | Audio bitrate (`128k`, `160k`, `192k`, `256k`, `320k`) | `320k` |
 | `--explicit-mode` | Audio version: `explicit` (uncensored) or `clean` (radio edit) | `explicit` |
 | `--no-lyrics` | Do not fetch or embed lyrics into audio files | `False` |
+| `--lyrics-script` | Preferred script for Hindi lyrics (`hinglish`, `devanagari`, `original`) | `hinglish` |
 | `--force` | Re-download songs even if already present | `False` |
 | `--limit` | Limit download to first N tracks | `None` (all) |
 | `--downsize` | Downsize/transcode all songs in a folder to target bitrate | `None` |
@@ -162,6 +164,23 @@ If you already downloaded songs and want to switch them between Explicit and Cle
 - **Format Support**: Embedded into ID3 tags via `USLT` (Unsynchronized Lyrics) for MP3, `©lyr` for M4A, and `lyrics` for FLAC.
 - **How to View on iPhone**: Open the Music app on your iPhone or iPod (iOS 7.1.2 through iOS 18), start playing a song, and tap once on the large album cover art on the player screen. The lyrics will overlay seamlessly over the cover.
 - **Companion `.lrc`**: A timestamped `.lrc` file is also created alongside each song for third-party media players that support synchronized karaoke-style scrolling lyrics.
+
+### Hindi and Hinglish Lyrics Preference
+
+When downloading Bollywood or Hindi songs, lyrics in online databases are frequently in Devanagari script (e.g. `नैना थके थके`), making it difficult to sing along if you prefer reading the Roman/English alphabet:
+
+- **Hinglish (English Letters)** *(Default)*: Automatically converts Devanagari Hindi text to Romanized Hinglish (e.g. `naina thake thake, palaken bujhi bujhi`) while preserving timestamps and punctuation.
+- **Hindi (Devanagari Script)**: Preserves native Devanagari script.
+- **Original (Database Default)**: Retains whatever script is returned directly by the lyrics provider.
+
+Configure this in the **Hindi Lyrics Script** dropdown under Download Settings or in the **Explicit & Lyrics Manager** dialog. Via CLI:
+```powershell
+# Download with Hinglish transliteration (default):
+python spotify_dl.py https://open.spotify.com/playlist/<id> --lyrics-script hinglish
+
+# Update existing library to Hinglish lyrics:
+python spotify_dl.py --update-explicit "C:\Users\mehul\Music\Spotify Downloads" --lyrics-script hinglish --no-redownload
+```
 
 ---
 

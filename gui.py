@@ -66,8 +66,8 @@ class SpotifyDownloaderApp(ctk.CTk):
         ctk.set_default_color_theme("green")
 
         self.title("Spotify Downloader")
-        self.geometry("660x700")
-        self.minsize(620, 620)
+        self.geometry("660x730")
+        self.minsize(620, 640)
 
         # Set window icon if available
         icon_path = SCRIPT_DIR / "icon.ico"
@@ -100,6 +100,7 @@ class SpotifyDownloaderApp(ctk.CTk):
             "force": False,
             "explicit_mode": "Explicit (Uncensored)",
             "embed_lyrics": True,
+            "lyrics_script": "Hinglish (English Letters)",
         }
         if self.config_file.exists():
             try:
@@ -123,6 +124,7 @@ class SpotifyDownloaderApp(ctk.CTk):
             force_val = self.force_var.get() if hasattr(self, "force_var") else False
             explicit_val = self.explicit_mode_var.get() if hasattr(self, "explicit_mode_var") else "Explicit (Uncensored)"
             lyrics_val = self.embed_lyrics_var.get() if hasattr(self, "embed_lyrics_var") else True
+            script_val = self.lyrics_script_var.get() if hasattr(self, "lyrics_script_var") else "Hinglish (English Letters)"
 
             cfg = {
                 "output_dir": folder_val or str(Path.home() / "Music" / "Spotify Downloads"),
@@ -133,6 +135,7 @@ class SpotifyDownloaderApp(ctk.CTk):
                 "force": force_val,
                 "explicit_mode": explicit_val,
                 "embed_lyrics": lyrics_val,
+                "lyrics_script": script_val,
             }
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=2)
@@ -438,6 +441,28 @@ class SpotifyDownloaderApp(ctk.CTk):
         )
         self.embed_lyrics_checkbox.pack(anchor="w")
 
+        # Row 4: Hindi Lyrics Script Preference
+        row4 = ctk.CTkFrame(settings_inner, fg_color="transparent")
+        row4.pack(fill="x", pady=(8, 0))
+
+        script_label = ctk.CTkLabel(row4, text="Hindi Lyrics Script:", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray85")
+        script_label.pack(side="left", padx=(0, 8))
+        self.lyrics_script_var = ctk.StringVar(value=self.saved_config.get("lyrics_script", "Hinglish (English Letters)"))
+        self.lyrics_script_menu = ctk.CTkOptionMenu(
+            row4,
+            values=["Hinglish (English Letters)", "Hindi (Devanagari Script)", "Original (Database Default)"],
+            variable=self.lyrics_script_var,
+            width=210,
+            height=32,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.lyrics_script_menu.pack(side="left", padx=(0, 12))
+
+        script_hint = ctk.CTkLabel(row4, text="Translates Hindi lyrics to English letters for singing along", font=ctk.CTkFont(size=11), text_color="gray60")
+        script_hint.pack(side="left")
+
         # ── Download Action Button ───────────────────────────────────────────
         self.start_btn = ctk.CTkButton(
             main_frame,
@@ -601,6 +626,8 @@ class SpotifyDownloaderApp(ctk.CTk):
         exp_choice = self.explicit_mode_var.get().strip()
         explicit_mode = "clean" if "clean" in exp_choice.lower() else "explicit"
         embed_lyrics = self.embed_lyrics_var.get()
+        script_choice = self.lyrics_script_var.get().strip()
+        lyrics_script = "hinglish" if "hinglish" in script_choice.lower() else ("devanagari" if "devanagari" in script_choice.lower() else "original")
 
         # Determine max parallel workers from dropdown
         speed_text = self.threads_var.get()
@@ -626,7 +653,7 @@ class SpotifyDownloaderApp(ctk.CTk):
         self._append_log(f"Starting download to: {output_path}")
         settings_summary = f"Format: {fmt.upper()} @ {bitrate} | Speed: {max_workers} songs at once | Version: {exp_choice}"
         if embed_lyrics:
-            settings_summary += " | Lyrics: Embedded"
+            settings_summary += f" | Lyrics: Embedded ({script_choice.split()[0]})"
         if limit_val:
             settings_summary += f" | Limit: first {limit_val} tracks"
         if force_redownload:
@@ -635,7 +662,7 @@ class SpotifyDownloaderApp(ctk.CTk):
 
         self._download_thread = threading.Thread(
             target=self._run_download_worker,
-            args=(url, output_path, max_workers, fmt, bitrate, limit_val, force_redownload, explicit_mode, embed_lyrics),
+            args=(url, output_path, max_workers, fmt, bitrate, limit_val, force_redownload, explicit_mode, embed_lyrics, lyrics_script),
             daemon=True,
         )
         self._download_thread.start()
@@ -651,6 +678,7 @@ class SpotifyDownloaderApp(ctk.CTk):
         force_redownload: bool = False,
         explicit_mode: str = "explicit",
         embed_lyrics: bool = True,
+        lyrics_script: str = "hinglish",
     ):
         def progress_callback(status: str, prog: float, current_track: str = None):
             self.after(0, lambda s=status, p=prog, c=current_track: self._update_progress(s, p, c))
@@ -671,6 +699,7 @@ class SpotifyDownloaderApp(ctk.CTk):
                 cancel_check=cancel_check,
                 explicit_mode=explicit_mode,
                 embed_lyrics=embed_lyrics,
+                lyrics_script=lyrics_script,
             )
             self.after(0, lambda r=result: self._on_download_complete(r))
         except Exception as e:
@@ -1500,8 +1529,8 @@ class ExplicitLyricsDialog(ctk.CTkToplevel):
         super().__init__(parent)
 
         self.title("Explicit & Clean Audio / Lyrics Manager")
-        self.geometry("680x640")
-        self.minsize(620, 560)
+        self.geometry("680x670")
+        self.minsize(620, 580)
         self.transient(parent)
 
         icon_path = SCRIPT_DIR / "icon.ico"
@@ -1698,7 +1727,25 @@ class ExplicitLyricsDialog(ctk.CTkToplevel):
             hover_color="#F57C00",
             height=28,
         )
-        self.embed_lyrics_cb.pack(anchor="w")
+        self.embed_lyrics_cb.pack(anchor="w", pady=(0, 6))
+
+        # Hindi Lyrics Script Preference
+        script_row = ctk.CTkFrame(s_inner, fg_color="transparent")
+        script_row.pack(fill="x", pady=(2, 0))
+        ctk.CTkLabel(script_row, text="Hindi Lyrics Script:", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray85").pack(side="left", padx=(0, 8))
+        self.dialog_script_var = ctk.StringVar(value="Hinglish (English Letters)")
+        self.dialog_script_menu = ctk.CTkOptionMenu(
+            script_row,
+            values=["Hinglish (English Letters)", "Hindi (Devanagari Script)", "Original (Database Default)"],
+            variable=self.dialog_script_var,
+            width=200,
+            height=28,
+            fg_color="#2A2A2A",
+            button_color="#333333",
+            button_hover_color="#444444",
+        )
+        self.dialog_script_menu.pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(script_row, text="Translates Hindi lyrics to English letters for singing along", font=ctk.CTkFont(size=11), text_color="gray60").pack(side="left")
 
         # Action Buttons
         btn_row = ctk.CTkFrame(container, fg_color="transparent")
@@ -1786,6 +1833,8 @@ class ExplicitLyricsDialog(ctk.CTkToplevel):
         target_mode = "clean" if "clean" in self.target_mode_var.get().lower() else "explicit"
         redownload_swapped = self.swap_audio_var.get()
         embed_lyrics = self.embed_lyrics_var.get()
+        script_choice = self.dialog_script_var.get().strip()
+        lyrics_script = "hinglish" if "hinglish" in script_choice.lower() else ("devanagari" if "devanagari" in script_choice.lower() else "original")
 
         speed_text = self.speed_var.get()
         m = re.search(r"\d+", speed_text)
@@ -1805,7 +1854,7 @@ class ExplicitLyricsDialog(ctk.CTkToplevel):
 
         self._append_log("─" * 45)
         self._append_log(f"Starting library update for: {f_path}")
-        self._append_log(f"Target: {self.target_mode_var.get()} | Re-download audio: {redownload_swapped} | Lyrics: {embed_lyrics}")
+        self._append_log(f"Target: {self.target_mode_var.get()} | Re-download audio: {redownload_swapped} | Lyrics: {embed_lyrics} ({script_choice.split()[0]})")
 
         def _worker():
             try:
@@ -1824,6 +1873,7 @@ class ExplicitLyricsDialog(ctk.CTkToplevel):
                     max_workers=max_workers,
                     callback=cb,
                     cancel_check=cancel_check,
+                    lyrics_script=lyrics_script,
                 )
                 self._msg_queue.put(("complete", res))
             except Exception as exc:
